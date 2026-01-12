@@ -589,7 +589,7 @@ mod tests {
             },
         )?;
 
-        let proof = Groth16::prove(
+        let proof = Groth16::<Bn254>::prove(
             &transcript.key.key,
             DummyCircuit {
                 a: ark_bn254::Fr::from(1),
@@ -599,10 +599,10 @@ mod tests {
             rng,
         )?;
 
-        let valid = Groth16::verify(&transcript.key.key.vk, &[Fr::from(2)], &proof)?;
+        let valid = Groth16::<Bn254>::verify(&transcript.key.key.vk, &[Fr::from(2)], &proof)?;
         assert!(valid, "Proof must be valid");
 
-        let valid = Groth16::verify(&transcript.key.key.vk, &[Fr::from(4)], &proof)?;
+        let valid = Groth16::<Bn254>::verify(&transcript.key.key.vk, &[Fr::from(4)], &proof)?;
         assert!(!valid, "Proof must be not valid");
 
         Ok(())
@@ -623,7 +623,7 @@ mod tests {
             },
         )?;
 
-        let proof = Groth16::prove(
+        let proof = Groth16::<Bls12_381>::prove(
             &transcript.key.key,
             DummyCircuit {
                 a: ark_bls12_381::Fr::from(1),
@@ -633,14 +633,14 @@ mod tests {
             rng,
         )?;
 
-        let valid = Groth16::verify(
+        let valid = Groth16::<Bls12_381>::verify(
             &transcript.key.key.vk,
             &[ark_bls12_381::Fr::from(2)],
             &proof,
         )?;
         assert!(valid, "Proof must be valid");
 
-        let valid = Groth16::verify(
+        let valid = Groth16::<Bls12_381>::verify(
             &transcript.key.key.vk,
             &[ark_bls12_381::Fr::from(4)],
             &proof,
@@ -665,7 +665,7 @@ mod tests {
             },
         )?;
 
-        let proof = Groth16::prove(
+        let proof = Groth16::<Bn254>::prove(
             &transcript.key.key,
             DummyCircuit {
                 a: ark_bn254::Fr::from(1),
@@ -675,10 +675,18 @@ mod tests {
             rng,
         )?;
 
-        let valid = Groth16::verify(&transcript.key.key.vk, &[ark_bn254::Fr::from(2)], &proof)?;
+        let valid = Groth16::<Bn254>::verify(
+            &transcript.key.key.vk,
+            &[ark_bn254::Fr::from(2)],
+            &proof,
+        )?;
         assert!(valid, "Proof must be valid");
 
-        let valid = Groth16::verify(&transcript.key.key.vk, &[ark_bn254::Fr::from(4)], &proof)?;
+        let valid = Groth16::<Bn254>::verify(
+            &transcript.key.key.vk,
+            &[ark_bn254::Fr::from(4)],
+            &proof,
+        )?;
         assert!(!valid, "Proof must be not valid");
 
         Ok(())
