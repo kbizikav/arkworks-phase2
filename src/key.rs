@@ -1,9 +1,9 @@
 use std::borrow::Borrow;
 
-use ark_ec::{AffineCurve, PairingEngine, ProjectiveCurve};
+use ark_ec::{pairing::Pairing, CurveGroup};
 use ark_ff::Field;
 use ark_groth16::ProvingKey;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Read, SerializationError, Write};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{end_timer, start_timer, UniformRand};
 use rand::Rng;
 
@@ -14,25 +14,25 @@ use crate::{
 };
 
 #[derive(CanonicalSerialize, CanonicalDeserialize, Debug, Clone, PartialEq)]
-pub struct FullKey<E: PairingEngine> {
+pub struct FullKey<E: Pairing> {
     pub key: ProvingKey<E>,
 }
 
 #[derive(CanonicalSerialize, CanonicalDeserialize, Debug, Clone, PartialEq)]
-pub struct PartialKey<E: PairingEngine> {
+pub struct PartialKey<E: Pairing> {
     pub delta_g1: E::G1Affine,
     pub delta_g2: E::G2Affine,
     pub h_query: Vec<E::G1Affine>,
     pub l_query: Vec<E::G1Affine>,
 }
 
-impl<E: PairingEngine> Borrow<PartialKey<E>> for FullKey<E> {
+impl<E: Pairing> Borrow<PartialKey<E>> for FullKey<E> {
     fn borrow(&self) -> &PartialKey<E> {
         todo!()
     }
 }
 
-impl<E: PairingEngine> PartialEq<PartialKey<E>> for FullKey<E> {
+impl<E: Pairing> PartialEq<PartialKey<E>> for FullKey<E> {
     fn eq(&self, other: &PartialKey<E>) -> bool {
         self.key.delta_g1 == other.delta_g1
             && self.key.vk.delta_g2 == other.delta_g2
@@ -41,19 +41,19 @@ impl<E: PairingEngine> PartialEq<PartialKey<E>> for FullKey<E> {
     }
 }
 
-impl<E: PairingEngine> From<ProvingKey<E>> for FullKey<E> {
+impl<E: Pairing> From<ProvingKey<E>> for FullKey<E> {
     fn from(val: ProvingKey<E>) -> Self {
         FullKey { key: val }
     }
 }
 
-impl<E: PairingEngine> From<FullKey<E>> for ProvingKey<E> {
+impl<E: Pairing> From<FullKey<E>> for ProvingKey<E> {
     fn from(val: FullKey<E>) -> Self {
         val.key
     }
 }
 
-impl<E: PairingEngine> From<ProvingKey<E>> for PartialKey<E> {
+impl<E: Pairing> From<ProvingKey<E>> for PartialKey<E> {
     fn from(val: ProvingKey<E>) -> Self {
         PartialKey {
             delta_g1: val.delta_g1,
@@ -64,7 +64,7 @@ impl<E: PairingEngine> From<ProvingKey<E>> for PartialKey<E> {
     }
 }
 
-impl<E: PairingEngine> From<&'_ FullKey<E>> for PartialKey<E> {
+impl<E: Pairing> From<&'_ FullKey<E>> for PartialKey<E> {
     fn from(val: &'_ FullKey<E>) -> Self {
         PartialKey {
             delta_g1: val.key.delta_g1,
@@ -75,7 +75,7 @@ impl<E: PairingEngine> From<&'_ FullKey<E>> for PartialKey<E> {
     }
 }
 
-impl<E: PairingEngine> From<FullKey<E>> for PartialKey<E> {
+impl<E: Pairing> From<FullKey<E>> for PartialKey<E> {
     fn from(val: FullKey<E>) -> Self {
         PartialKey {
             delta_g1: val.key.delta_g1,
@@ -86,7 +86,7 @@ impl<E: PairingEngine> From<FullKey<E>> for PartialKey<E> {
     }
 }
 
-impl<E: PairingEngine> From<&'_ ProvingKey<E>> for PartialKey<E> {
+impl<E: Pairing> From<&'_ ProvingKey<E>> for PartialKey<E> {
     fn from(val: &'_ ProvingKey<E>) -> Self {
         PartialKey {
             delta_g1: val.delta_g1,
@@ -97,7 +97,7 @@ impl<E: PairingEngine> From<&'_ ProvingKey<E>> for PartialKey<E> {
     }
 }
 
-impl<E: PairingEngine> PartialKey<E> {
+impl<E: Pairing> PartialKey<E> {
     pub fn challenge(&self) -> Result<Vec<u8>, Error> {
         Ok(serialize(&self.delta_g1)?
             .into_iter()
@@ -112,7 +112,7 @@ impl<E: PairingEngine> PartialKey<E> {
     pub fn contribute_rng<R: Rng>(&mut self, rng: &mut R) -> Result<RatioProof<E>, Error> {
         let timer = start_timer!(|| "Contributing to partial key");
 
-        let delta = E::Fr::rand(rng);
+        let delta = E::ScalarField::rand(rng);
         let delta_inverse = delta.inverse().expect("delta is not invertible");
 
         let proof = RatioProof::<E>::generate(delta, &self.challenge()?)?;
@@ -125,8 +125,8 @@ impl<E: PairingEngine> PartialKey<E> {
         batch_mul_fixed_scalar(&mut self.h_query, delta_inverse);
         end_timer!(h_timer);
 
-        self.delta_g1 = self.delta_g1.mul(delta).into_affine();
-        self.delta_g2 = self.delta_g2.mul(delta).into_affine();
+        self.delta_g1 = (self.delta_g1 * delta).into_affine();
+        self.delta_g2 = (self.delta_g2 * delta).into_affine();
 
         end_timer!(timer);
 
@@ -134,7 +134,7 @@ impl<E: PairingEngine> PartialKey<E> {
     }
 }
 
-impl<E: PairingEngine> FullKey<E> {
+impl<E: Pairing> FullKey<E> {
     pub fn challenge(&self) -> Result<Vec<u8>, Error> {
         Ok(serialize(&self.key.delta_g1)?
             .into_iter()

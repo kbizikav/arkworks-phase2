@@ -6,8 +6,8 @@ use std::{
     path::Path,
 };
 
-use ark_ec::{AffineCurve, PairingEngine};
-use ark_ff::{BigInteger, FpParameters, One, PrimeField, UniformRand};
+use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
+use ark_ff::{BigInteger, One, PrimeField, UniformRand};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use ark_relations::r1cs::SynthesisError;
 use ark_std::{add_to_trace, cfg_into_iter, cfg_iter_mut, end_timer, start_timer};
@@ -23,7 +23,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Default)]
-pub struct Accumulator<E: PairingEngine> {
+pub struct Accumulator<E: Pairing> {
     pub tau_powers_g1: Vec<E::G1Affine>,
     pub tau_powers_g2: Vec<E::G2Affine>,
     pub alpha_tau_powers_g1: Vec<E::G1Affine>,
@@ -31,14 +31,14 @@ pub struct Accumulator<E: PairingEngine> {
     pub beta_g2: E::G2Affine,
 }
 
-impl<E: PairingEngine> Accumulator<E> {
+impl<E: Pairing> Accumulator<E> {
     pub fn prepare_with_size(&self, size: usize) -> Result<PreparedAccumulator<E>, Error> {
         let timer = start_timer!(|| "Preparing accumulator");
 
         let (_, g1_len, g2_len) = self.check_pow_len();
 
-        let domain =
-            Radix2EvaluationDomain::new(size).ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+        let domain = Radix2EvaluationDomain::<E::ScalarField>::new(size)
+            .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
         let size = domain.size();
 
         (g2_len >= size && g1_len >= (size << 1) - 1)
@@ -47,7 +47,11 @@ impl<E: PairingEngine> Accumulator<E> {
 
         let h_query_timer = start_timer!(|| "Computing h_query");
         let h_query = cfg_into_iter!(0..size - 1)
-            .map(|i| (self.tau_powers_g1[i + size] + -self.tau_powers_g1[i]))
+            .map(|i| {
+                (self.tau_powers_g1[i + size].into_group()
+                    - self.tau_powers_g1[i].into_group())
+                .into_affine()
+            })
             .collect::<Vec<_>>();
         end_timer!(h_query_timer);
 
@@ -109,14 +113,14 @@ impl<E: PairingEngine> Accumulator<E> {
     pub fn contribute<R: Rng>(&mut self, rng: &mut R) {
         let timer = start_timer!(|| "Contributing to accumulator");
 
-        let tau = E::Fr::rand(rng);
-        let alpha = E::Fr::rand(rng);
-        let beta = E::Fr::rand(rng);
+        let tau = E::ScalarField::rand(rng);
+        let alpha = E::ScalarField::rand(rng);
+        let beta = E::ScalarField::rand(rng);
 
         let g1_powers = self.tau_powers_g1.len();
         let g2_powers = self.tau_powers_g2.len();
 
-        let mut tau_powers = iter::successors(Some(E::Fr::one()), |x| Some(*x * tau))
+        let mut tau_powers = iter::successors(Some(E::ScalarField::one()), |x| Some(*x * tau))
             .take(g1_powers)
             .collect::<Vec<_>>();
         let remaining_tau_powers = tau_powers.split_off(g2_powers);
@@ -128,28 +132,28 @@ impl<E: PairingEngine> Accumulator<E> {
             .zip(tau_powers)
             .for_each(
                 |((((tau_g1, tau_g2), alpha_tau_g1), beta_tau_g1), tau_power)| {
-                    *tau_g1 = tau_g1.mul(tau_power).into();
-                    *tau_g2 = tau_g2.mul(tau_power).into();
-                    *alpha_tau_g1 = alpha_tau_g1.mul(tau_power * alpha).into();
-                    *beta_tau_g1 = beta_tau_g1.mul(tau_power * beta).into();
+                    *tau_g1 = (*tau_g1 * tau_power).into();
+                    *tau_g2 = (*tau_g2 * tau_power).into();
+                    *alpha_tau_g1 = (*alpha_tau_g1 * (tau_power * alpha)).into();
+                    *beta_tau_g1 = (*beta_tau_g1 * (tau_power * beta)).into();
                 },
             );
         cfg_iter_mut!(self.tau_powers_g1)
             .skip(g2_powers)
             .zip(remaining_tau_powers)
-            .for_each(|(tau_g1, tau_power)| *tau_g1 = tau_g1.mul(tau_power).into());
-        self.beta_g2 = self.beta_g2.mul(beta).into();
+            .for_each(|(tau_g1, tau_power)| *tau_g1 = (*tau_g1 * tau_power).into());
+        self.beta_g2 = (self.beta_g2 * beta).into();
 
         end_timer!(timer);
     }
 
     pub fn empty(g1_powers: usize, g2_powers: usize) -> Self {
         Self {
-            tau_powers_g1: vec![E::G1Affine::prime_subgroup_generator(); g1_powers],
-            tau_powers_g2: vec![E::G2Affine::prime_subgroup_generator(); g2_powers],
-            alpha_tau_powers_g1: vec![E::G1Affine::prime_subgroup_generator(); g2_powers],
-            beta_tau_powers_g1: vec![E::G1Affine::prime_subgroup_generator(); g2_powers],
-            beta_g2: E::G2Affine::prime_subgroup_generator(),
+            tau_powers_g1: vec![E::G1Affine::generator(); g1_powers],
+            tau_powers_g2: vec![E::G2Affine::generator(); g2_powers],
+            alpha_tau_powers_g1: vec![E::G1Affine::generator(); g2_powers],
+            beta_tau_powers_g1: vec![E::G1Affine::generator(); g2_powers],
+            beta_g2: E::G2Affine::generator(),
         }
     }
 
@@ -162,7 +166,7 @@ impl<E: PairingEngine> Accumulator<E> {
     }
 
     pub fn empty_from_max_constraints(max_constraints: usize) -> Result<Self, Error> {
-        let domain = Radix2EvaluationDomain::<E::Fr>::new(max_constraints)
+        let domain = Radix2EvaluationDomain::<E::ScalarField>::new(max_constraints)
             .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
         let degree = domain.size();
         let g2_powers = match ((max_constraints << 1) - 1) >= (degree << 1) {
@@ -173,7 +177,7 @@ impl<E: PairingEngine> Accumulator<E> {
     }
 }
 
-impl<E: PairingEngine + PairingReader> Accumulator<E> {
+impl<E: Pairing + PairingReader> Accumulator<E> {
     pub fn from_ptau_file<P: AsRef<Path>>(path: P) -> Result<Accumulator<E>, Error> {
         let timer = start_timer!(|| "Reading from ptau file");
 
@@ -232,7 +236,7 @@ impl<E: PairingEngine + PairingReader> Accumulator<E> {
 
         let mut buffer = vec![0u8; n];
         reader.read_exact(&mut buffer)?;
-        (buffer == <<E::Fq as PrimeField>::Params as FpParameters>::MODULUS.to_bytes_le())
+        (buffer == <E::BaseField as PrimeField>::MODULUS.to_bytes_le())
             .then_some(())
             .ok_or(Error::PtauFieldNotMatching)?;
 
@@ -351,8 +355,8 @@ impl<E: PairingEngine + PairingReader> Accumulator<E> {
                 .ok_or(crate::error::Error::Read(String::from(
                     "Unable to read evaluation domain from radix file name",
                 )))?;
-        let domain =
-            Radix2EvaluationDomain::new(n_taus).ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+        let domain = Radix2EvaluationDomain::<E::ScalarField>::new(n_taus)
+            .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
 
         let mut reader = BufReader::new(File::open(path)?);
 
@@ -409,7 +413,7 @@ impl<E: PairingEngine + PairingReader> Accumulator<E> {
         tau_powers_g1.append(
             &mut (0..n_taus - 1)
                 .map(|i| -> Result<_, Error> {
-                    Ok(E::read_radix_g1(&mut reader)? + tau_powers_g1[i])
+                    Ok((E::read_radix_g1(&mut reader)? + tau_powers_g1[i]).into_affine())
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
@@ -429,18 +433,18 @@ impl<E: PairingEngine + PairingReader> Accumulator<E> {
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Default)]
 #[must_use = "Prepared accumulator must be used in constraint generation"]
-pub struct PreparedAccumulator<E: PairingEngine> {
+pub struct PreparedAccumulator<E: Pairing> {
     pub alpha: E::G1Affine,
     pub beta: E::G1Affine,
-    pub tau_lagrange_g1: Vec<E::G1Projective>,
-    pub tau_lagrange_g2: Vec<E::G2Projective>,
-    pub alpha_lagrange_g1: Vec<E::G1Projective>,
-    pub beta_lagrange_g1: Vec<E::G1Projective>,
+    pub tau_lagrange_g1: Vec<E::G1>,
+    pub tau_lagrange_g2: Vec<E::G2>,
+    pub alpha_lagrange_g1: Vec<E::G1>,
+    pub beta_lagrange_g1: Vec<E::G1>,
     pub beta_g2: E::G2Affine,
     pub h_query: Vec<E::G1Affine>,
 }
 
-impl<E: PairingEngine> PreparedAccumulator<E> {
+impl<E: Pairing> PreparedAccumulator<E> {
     pub fn check_pow_len(&self) -> (bool, usize) {
         let len = self.tau_lagrange_g1.len();
 
@@ -454,7 +458,7 @@ impl<E: PairingEngine> PreparedAccumulator<E> {
     }
 }
 
-impl<E: PairingEngine + PairingReader> PreparedAccumulator<E> {
+impl<E: Pairing + PairingReader> PreparedAccumulator<E> {
     pub fn from_radix_file<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let timer = start_timer!(|| "Reading from phase1radix file");
         let path: &Path = path.as_ref();
@@ -585,7 +589,7 @@ mod tests {
             },
         )?;
 
-        let proof = Groth16::prove(
+        let proof = Groth16::<Bn254>::prove(
             &transcript.key.key,
             DummyCircuit {
                 a: ark_bn254::Fr::from(1),
@@ -595,10 +599,10 @@ mod tests {
             rng,
         )?;
 
-        let valid = Groth16::verify(&transcript.key.key.vk, &[Fr::from(2)], &proof)?;
+        let valid = Groth16::<Bn254>::verify(&transcript.key.key.vk, &[Fr::from(2)], &proof)?;
         assert!(valid, "Proof must be valid");
 
-        let valid = Groth16::verify(&transcript.key.key.vk, &[Fr::from(4)], &proof)?;
+        let valid = Groth16::<Bn254>::verify(&transcript.key.key.vk, &[Fr::from(4)], &proof)?;
         assert!(!valid, "Proof must be not valid");
 
         Ok(())
@@ -619,7 +623,7 @@ mod tests {
             },
         )?;
 
-        let proof = Groth16::prove(
+        let proof = Groth16::<Bls12_381>::prove(
             &transcript.key.key,
             DummyCircuit {
                 a: ark_bls12_381::Fr::from(1),
@@ -629,14 +633,14 @@ mod tests {
             rng,
         )?;
 
-        let valid = Groth16::verify(
+        let valid = Groth16::<Bls12_381>::verify(
             &transcript.key.key.vk,
             &[ark_bls12_381::Fr::from(2)],
             &proof,
         )?;
         assert!(valid, "Proof must be valid");
 
-        let valid = Groth16::verify(
+        let valid = Groth16::<Bls12_381>::verify(
             &transcript.key.key.vk,
             &[ark_bls12_381::Fr::from(4)],
             &proof,
@@ -661,7 +665,7 @@ mod tests {
             },
         )?;
 
-        let proof = Groth16::prove(
+        let proof = Groth16::<Bn254>::prove(
             &transcript.key.key,
             DummyCircuit {
                 a: ark_bn254::Fr::from(1),
@@ -671,10 +675,18 @@ mod tests {
             rng,
         )?;
 
-        let valid = Groth16::verify(&transcript.key.key.vk, &[ark_bn254::Fr::from(2)], &proof)?;
+        let valid = Groth16::<Bn254>::verify(
+            &transcript.key.key.vk,
+            &[ark_bn254::Fr::from(2)],
+            &proof,
+        )?;
         assert!(valid, "Proof must be valid");
 
-        let valid = Groth16::verify(&transcript.key.key.vk, &[ark_bn254::Fr::from(4)], &proof)?;
+        let valid = Groth16::<Bn254>::verify(
+            &transcript.key.key.vk,
+            &[ark_bn254::Fr::from(4)],
+            &proof,
+        )?;
         assert!(!valid, "Proof must be not valid");
 
         Ok(())

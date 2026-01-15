@@ -75,7 +75,7 @@ mod tests {
         transcript.verify()?;
 
         let pk = transcript.key.key;
-        let proof = Groth16::prove(
+        let proof = Groth16::<Bn254>::prove(
             &pk,
             DummyCircuit {
                 a: Fr::from(1),
@@ -85,10 +85,10 @@ mod tests {
             rng,
         )?;
 
-        let valid = Groth16::verify(&pk.vk, &[Fr::from(3)], &proof)?;
+        let valid = Groth16::<Bn254>::verify(&pk.vk, &[Fr::from(3)], &proof)?;
         assert!(valid, "Proof must be valid");
 
-        let valid = Groth16::verify(&pk.vk, &[Fr::from(4)], &proof)?;
+        let valid = Groth16::<Bn254>::verify(&pk.vk, &[Fr::from(4)], &proof)?;
         assert!(!valid, "Proof must be not valid");
 
         Ok(())

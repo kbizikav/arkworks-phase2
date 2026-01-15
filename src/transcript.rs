@@ -1,13 +1,13 @@
 use std::sync::{Arc, Mutex};
 
-use ark_ec::{AffineCurve, PairingEngine, ProjectiveCurve};
-use ark_ff::{Field, PrimeField, UniformRand, Zero};
+use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
+use ark_ff::{Field, UniformRand, Zero};
 use ark_groth16::{ProvingKey, VerifyingKey};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use ark_relations::r1cs::{
     ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, SynthesisError,
 };
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Read, SerializationError, Write};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{cfg_iter, end_timer, start_timer};
 use rand::Rng;
 
@@ -27,16 +27,16 @@ use crate::{
 use rayon::prelude::*;
 
 #[derive(CanonicalSerialize, CanonicalDeserialize, Debug, Clone, PartialEq)]
-pub struct Transcript<E: PairingEngine> {
+pub struct Transcript<E: Pairing> {
     pub key: FullKey<E>,
     pub initial_key: PartialKey<E>,
     pub contributions: Vec<PublicKey<E>>,
 }
 
-impl<E: PairingEngine> Transcript<E> {
+impl<E: Pairing> Transcript<E> {
     fn new_from_prepared_accumulator_finalized_cs(
         accum: &PreparedAccumulator<E>,
-        cs: ConstraintSystemRef<E::Fr>,
+        cs: ConstraintSystemRef<E::ScalarField>,
     ) -> Result<Self, Error> {
         let timer = start_timer!(|| "Generating transcript from prepared accumulator");
 
@@ -48,7 +48,7 @@ impl<E: PairingEngine> Transcript<E> {
         let (valid, len) = accum.check_pow_len();
         valid.then_some(()).ok_or(Error::InvalidPOTSize)?;
 
-        let domain = Radix2EvaluationDomain::<E::Fr>::new(total_constraints)
+        let domain = Radix2EvaluationDomain::<E::ScalarField>::new(total_constraints)
             .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
         let size = domain.size();
 
@@ -58,10 +58,10 @@ impl<E: PairingEngine> Transcript<E> {
 
         let num_witnesses =
             constraint_matrices.num_witness_variables + constraint_matrices.num_instance_variables;
-        let a_g1 = Arc::new(Mutex::new(vec![E::G1Projective::zero(); num_witnesses]));
-        let b_g1 = Arc::new(Mutex::new(vec![E::G1Projective::zero(); num_witnesses]));
-        let b_g2 = Arc::new(Mutex::new(vec![E::G2Projective::zero(); num_witnesses]));
-        let ext = Arc::new(Mutex::new(vec![E::G1Projective::zero(); num_witnesses]));
+        let a_g1 = Arc::new(Mutex::new(vec![E::G1::zero(); num_witnesses]));
+        let b_g1 = Arc::new(Mutex::new(vec![E::G1::zero(); num_witnesses]));
+        let b_g2 = Arc::new(Mutex::new(vec![E::G2::zero(); num_witnesses]));
+        let ext = Arc::new(Mutex::new(vec![E::G1::zero(); num_witnesses]));
 
         let add_dummy_constraints_timer = start_timer!(|| "Adding dummy constraints");
         a_g1.lock()?[0..num_instance_variables]
@@ -82,16 +82,16 @@ impl<E: PairingEngine> Transcript<E> {
             .for_each(
                 |((((((a_poly, b_poly), c_poly), tau_g1), tau_g2), alpha_tau), beta_tau)| {
                     cfg_iter!(a_poly).for_each(|(coeff, index)| {
-                        a_g1.lock().unwrap()[*index] += tau_g1.mul(coeff.into_repr());
-                        ext.lock().unwrap()[*index] += beta_tau.mul(coeff.into_repr());
+                        a_g1.lock().unwrap()[*index] += *tau_g1 * *coeff;
+                        ext.lock().unwrap()[*index] += *beta_tau * *coeff;
                     });
                     cfg_iter!(b_poly).for_each(|(coeff, index)| {
-                        b_g1.lock().unwrap()[*index] += tau_g1.mul(coeff.into_repr());
-                        b_g2.lock().unwrap()[*index] += tau_g2.mul(coeff.into_repr());
-                        ext.lock().unwrap()[*index] += alpha_tau.mul(coeff.into_repr());
+                        b_g1.lock().unwrap()[*index] += *tau_g1 * *coeff;
+                        b_g2.lock().unwrap()[*index] += *tau_g2 * *coeff;
+                        ext.lock().unwrap()[*index] += *alpha_tau * *coeff;
                     });
                     cfg_iter!(c_poly).for_each(|(coeff, index)| {
-                        ext.lock().unwrap()[*index] += tau_g1.mul(coeff.into_repr());
+                        ext.lock().unwrap()[*index] += *tau_g1 * *coeff;
                     });
                 },
             );
@@ -115,12 +115,12 @@ impl<E: PairingEngine> Transcript<E> {
             vk: VerifyingKey {
                 alpha_g1: accum.alpha,
                 beta_g2: accum.beta_g2,
-                gamma_g2: E::G2Affine::prime_subgroup_generator(),
-                delta_g2: E::G2Affine::prime_subgroup_generator(),
+                gamma_g2: E::G2Affine::generator(),
+                delta_g2: E::G2Affine::generator(),
                 gamma_abc_g1: public_cross_terms,
             },
             beta_g1: accum.beta,
-            delta_g1: E::G1Affine::prime_subgroup_generator(),
+            delta_g1: E::G1Affine::generator(),
             a_query,
             b_g1_query,
             b_g2_query,
@@ -137,7 +137,7 @@ impl<E: PairingEngine> Transcript<E> {
         })
     }
 
-    pub fn new_from_prepared_accumulator<C: ConstraintSynthesizer<E::Fr>>(
+    pub fn new_from_prepared_accumulator<C: ConstraintSynthesizer<E::ScalarField>>(
         accum: &PreparedAccumulator<E>,
         circuit: C,
     ) -> Result<Self, Error> {
@@ -162,7 +162,7 @@ impl<E: PairingEngine> Transcript<E> {
         Self::new_from_prepared_accumulator_finalized_cs(accum, cs)
     }
 
-    pub fn new_from_accumulator<C: ConstraintSynthesizer<E::Fr>>(
+    pub fn new_from_accumulator<C: ConstraintSynthesizer<E::ScalarField>>(
         accum: &Accumulator<E>,
         circuit: C,
     ) -> Result<Self, Error> {
@@ -177,7 +177,7 @@ impl<E: PairingEngine> Transcript<E> {
         let (valid, g1_len, g2_len) = accum.check_pow_len();
         valid.then_some(()).ok_or(Error::InvalidPOTSize)?;
 
-        let domain = Radix2EvaluationDomain::<E::Fr>::new(total_constraints)
+        let domain = Radix2EvaluationDomain::<E::ScalarField>::new(total_constraints)
             .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
         let size = domain.size();
 
@@ -195,7 +195,7 @@ impl<E: PairingEngine> Transcript<E> {
     pub fn contribute_rng<R: Rng>(&mut self, rng: &mut R) -> Result<(), Error> {
         let timer = start_timer!(|| "Contributing to transcript");
 
-        let delta = E::Fr::rand(rng);
+        let delta = E::ScalarField::rand(rng);
         let delta_inverse = delta.inverse().expect("delta is not invertible");
 
         let proof = RatioProof::<E>::generate(delta, &self.key.challenge()?)?;
@@ -208,8 +208,8 @@ impl<E: PairingEngine> Transcript<E> {
         batch_mul_fixed_scalar(&mut self.key.key.h_query, delta_inverse);
         end_timer!(h_timer);
 
-        self.key.key.delta_g1 = self.key.key.delta_g1.mul(delta).into_affine();
-        self.key.key.vk.delta_g2 = self.key.key.vk.delta_g2.mul(delta).into_affine();
+        self.key.key.delta_g1 = (self.key.key.delta_g1 * delta).into_affine();
+        self.key.key.vk.delta_g2 = (self.key.key.vk.delta_g2 * delta).into_affine();
         self.contributions.push(PublicKey {
             delta_g2: self.key.key.vk.delta_g2,
             proof,
@@ -298,7 +298,7 @@ impl<E: PairingEngine> Transcript<E> {
     }
 
     #[inline]
-    pub fn verify_from_accumulator<C: ConstraintSynthesizer<E::Fr>>(
+    pub fn verify_from_accumulator<C: ConstraintSynthesizer<E::ScalarField>>(
         &self,
         accum: &Accumulator<E>,
         circuit: C,
