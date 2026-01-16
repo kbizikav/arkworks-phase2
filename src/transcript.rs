@@ -35,13 +35,32 @@ pub struct Transcript<E: Pairing> {
 }
 
 impl<E: Pairing> Transcript<E> {
+    fn r1cs_constraint_count(
+        cs: &ConstraintSystemRef<E::ScalarField>,
+    ) -> Result<usize, Error> {
+        let r1cs_constraints = cs
+            .get_predicates_num_constraints(R1CS_PREDICATE_LABEL)
+            .ok_or_else(|| Error::Custom("missing R1CS predicate".to_string()))?;
+
+        for (label, count) in cs.get_all_predicates_num_constraints() {
+            if label != R1CS_PREDICATE_LABEL {
+                return Err(Error::Custom(format!(
+                    "non-R1CS predicate '{}' ({} constraints) is not supported",
+                    label, count
+                )));
+            }
+        }
+
+        Ok(r1cs_constraints)
+    }
+
     fn new_from_prepared_accumulator_finalized_cs(
         accum: &PreparedAccumulator<E>,
         cs: ConstraintSystemRef<E::ScalarField>,
     ) -> Result<Self, Error> {
         let timer = start_timer!(|| "Generating transcript from prepared accumulator");
 
-        let num_constraints = cs.num_constraints();
+        let num_constraints = Self::r1cs_constraint_count(&cs)?;
         let num_instance_variables = cs.num_instance_variables();
         let total_constraints = num_constraints + num_instance_variables;
         let constraint_matrices = cs.to_matrices()?;
@@ -154,7 +173,7 @@ impl<E: Pairing> Transcript<E> {
         circuit.generate_constraints(cs.clone())?;
         cs.finalize();
 
-        let num_constraints = cs.num_constraints();
+        let num_constraints = Self::r1cs_constraint_count(&cs)?;
         let num_instance_variables = cs.num_instance_variables();
         let total_constraints = num_constraints + num_instance_variables;
 
@@ -179,7 +198,7 @@ impl<E: Pairing> Transcript<E> {
         circuit.generate_constraints(cs.clone())?;
         cs.finalize();
 
-        let num_constraints = cs.num_constraints();
+        let num_constraints = Self::r1cs_constraint_count(&cs)?;
         let num_instance_variables = cs.num_instance_variables();
         let total_constraints = num_constraints + num_instance_variables;
 
@@ -344,5 +363,46 @@ impl<E: Pairing> Transcript<E> {
         self.verify()?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Transcript;
+    use crate::{accumulator::Accumulator, error::Error};
+    use ark_bn254::{Bn254, Fr};
+    use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+    use ark_relations::gr1cs::predicate::PredicateConstraintSystem;
+    use ark_relations::gr1cs::predicate::polynomial_constraint::SR1CS_PREDICATE_LABEL;
+    use ark_relations::lc;
+
+    struct Sr1csCircuit;
+
+    impl ConstraintSynthesizer<Fr> for Sr1csCircuit {
+        fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+            cs.register_predicate(
+                SR1CS_PREDICATE_LABEL,
+                PredicateConstraintSystem::new_sr1cs_predicate()?,
+            )?;
+
+            let x = cs.new_witness_variable(|| Ok(Fr::from(3u64)))?;
+            let y = cs.new_witness_variable(|| Ok(Fr::from(9u64)))?;
+            cs.enforce_sr1cs_constraint(|| lc![x], || lc![y])?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rejects_non_r1cs_predicate() {
+        let accum = Accumulator::<Bn254>::empty_from_degree(1).expect("accumulator");
+        let prepared = accum.prepare().expect("prepare");
+
+        let err = Transcript::new_from_prepared_accumulator(&prepared, Sr1csCircuit)
+            .expect_err("expected non-R1CS predicate to be rejected");
+
+        match err {
+            Error::Custom(message) => assert!(message.contains("non-R1CS predicate")),
+            _ => panic!("unexpected error: {err:?}"),
+        }
     }
 }
