@@ -35,3 +35,16 @@ default = ["std"]
 no-std = []
 parallel = ["rayon", "ark-ff/parallel", "ark-ec/parallel", "ark-std/parallel", "ark-r1cs-std/parallel", "ark-poly/parallel", "ark-groth16/parallel"]
 std = ["ark-std/std", "ark-ff/std", "ark-ec/std", "ark-r1cs-std/std", "ark-poly/std", "ark-relations/std", "ark-groth16/std", "ark-serialize/std"]
+
+[patch.crates-io]
+ark-ff = { git = "https://github.com/arkworks-rs/algebra" }
+ark-ec = { git = "https://github.com/arkworks-rs/algebra" }
+ark-serialize = { git = "https://github.com/arkworks-rs/algebra" }
+ark-poly = { git = "https://github.com/arkworks-rs/algebra" }
+ark-bn254 = { git = "https://github.com/arkworks-rs/algebra" }
+ark-bls12-381 = { git = "https://github.com/arkworks-rs/algebra" }
+ark-std = { git = "https://github.com/arkworks-rs/std" }
+ark-relations = { git = "https://github.com/arkworks-rs/snark" }
+ark-snark = { git = "https://github.com/arkworks-rs/snark" }
+ark-r1cs-std = { git = "https://github.com/winderica/r1cs-std", rev = "ae8283a" }
+ark-groth16 = { git = "https://github.com/arkworks-rs/groth16", rev = "b3b4a15" }

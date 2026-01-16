@@ -4,8 +4,9 @@ use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 use ark_ff::{Field, UniformRand, Zero};
 use ark_groth16::{ProvingKey, VerifyingKey};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
-use ark_relations::r1cs::{
+use ark_relations::gr1cs::{
     ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, SynthesisError,
+    R1CS_PREDICATE_LABEL,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{cfg_iter, end_timer, start_timer};
@@ -43,7 +44,14 @@ impl<E: Pairing> Transcript<E> {
         let num_constraints = cs.num_constraints();
         let num_instance_variables = cs.num_instance_variables();
         let total_constraints = num_constraints + num_instance_variables;
-        let constraint_matrices = cs.to_matrices().ok_or(Error::MissingCSMatrices)?;
+        let constraint_matrices = cs.to_matrices()?;
+        let r1cs_matrices = constraint_matrices
+            .get(R1CS_PREDICATE_LABEL)
+            .ok_or(Error::MissingCSMatrices)?;
+        let (a_matrix, b_matrix, c_matrix) = match r1cs_matrices.as_slice() {
+            [a, b, c] => (a, b, c),
+            _ => return Err(Error::InvariantViolated("unexpected R1CS matrix arity")),
+        };
 
         let (valid, len) = accum.check_pow_len();
         valid.then_some(()).ok_or(Error::InvalidPOTSize)?;
@@ -56,8 +64,9 @@ impl<E: Pairing> Transcript<E> {
             .then_some(())
             .ok_or(Error::InvalidPOTDegree(ark_std::log2(size)))?;
 
-        let num_witnesses =
-            constraint_matrices.num_witness_variables + constraint_matrices.num_instance_variables;
+        let num_instance_variables = cs.num_instance_variables();
+        let num_witness_variables = cs.num_witness_variables();
+        let num_witnesses = num_instance_variables + num_witness_variables;
         let a_g1 = Arc::new(Mutex::new(vec![E::G1::zero(); num_witnesses]));
         let b_g1 = Arc::new(Mutex::new(vec![E::G1::zero(); num_witnesses]));
         let b_g2 = Arc::new(Mutex::new(vec![E::G2::zero(); num_witnesses]));
@@ -72,9 +81,9 @@ impl<E: Pairing> Transcript<E> {
 
         let specialize_constraints_timer =
             start_timer!(|| "Specializing constraints into phase 2 key");
-        cfg_iter!(constraint_matrices.a)
-            .zip(cfg_iter!(constraint_matrices.b))
-            .zip(cfg_iter!(constraint_matrices.c))
+        cfg_iter!(a_matrix)
+            .zip(cfg_iter!(b_matrix))
+            .zip(cfg_iter!(c_matrix))
             .zip(cfg_iter!(accum.tau_lagrange_g1))
             .zip(cfg_iter!(accum.tau_lagrange_g2))
             .zip(cfg_iter!(accum.alpha_lagrange_g1))
@@ -102,12 +111,12 @@ impl<E: Pairing> Transcript<E> {
         let b_g2_query = batch_into_affine(&b_g2.lock()?);
         let ext = batch_into_affine(&ext.lock()?);
 
-        let public_cross_terms = Vec::from(&ext[..constraint_matrices.num_instance_variables]);
-        let private_cross_terms = Vec::from(&ext[constraint_matrices.num_instance_variables..]);
+        let public_cross_terms = ext[..num_instance_variables].to_vec();
+        let private_cross_terms = ext[num_instance_variables..].to_vec();
 
         for l in &private_cross_terms {
             if l.is_zero() {
-                return Err(SynthesisError::UnconstrainedVariable)?;
+                return Err(Error::InvariantViolated("unconstrained variable"));
             }
         }
 

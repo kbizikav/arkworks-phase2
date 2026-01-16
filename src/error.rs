@@ -1,6 +1,6 @@
 use std::sync::PoisonError;
 
-use ark_relations::r1cs::SynthesisError;
+use ark_relations::gr1cs::SynthesisError;
 use thiserror::Error;
 
 #[derive(Error, Clone, Debug, Eq, PartialEq)]

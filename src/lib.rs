@@ -19,7 +19,7 @@ mod tests {
         fields::fp::FpVar,
         prelude::{AllocVar, EqGadget},
     };
-    use ark_relations::r1cs::ConstraintSynthesizer;
+    use ark_relations::gr1cs::ConstraintSynthesizer;
     use ark_serialize::CanonicalDeserialize;
     use ark_snark::SNARK;
     use rand::rngs::OsRng;
@@ -37,8 +37,8 @@ mod tests {
     impl ConstraintSynthesizer<Fr> for DummyCircuit {
         fn generate_constraints(
             self,
-            cs: ark_relations::r1cs::ConstraintSystemRef<Fr>,
-        ) -> ark_relations::r1cs::Result<()> {
+            cs: ark_relations::gr1cs::ConstraintSystemRef<Fr>,
+        ) -> ark_relations::gr1cs::Result<()> {
             let a = FpVar::new_witness(cs.clone(), || Ok(self.a))?;
             let b = FpVar::new_witness(cs.clone(), || Ok(self.b))?;
             let c = FpVar::new_input(cs, || Ok(self.c))?;

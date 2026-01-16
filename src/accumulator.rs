@@ -9,7 +9,7 @@ use std::{
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 use ark_ff::{BigInteger, One, PrimeField, UniformRand};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
-use ark_relations::r1cs::SynthesisError;
+use ark_relations::gr1cs::SynthesisError;
 use ark_std::{add_to_trace, cfg_into_iter, cfg_iter_mut, end_timer, start_timer};
 use rand::Rng;
 
@@ -544,7 +544,7 @@ mod tests {
         fields::fp::FpVar,
         prelude::{AllocVar, EqGadget},
     };
-    use ark_relations::r1cs::ConstraintSynthesizer;
+    use ark_relations::gr1cs::ConstraintSynthesizer;
     use ark_snark::SNARK;
     use rand::rngs::OsRng;
 
@@ -561,8 +561,8 @@ mod tests {
     impl<F: PrimeField> ConstraintSynthesizer<F> for DummyCircuit<F> {
         fn generate_constraints(
             self,
-            cs: ark_relations::r1cs::ConstraintSystemRef<F>,
-        ) -> ark_relations::r1cs::Result<()> {
+            cs: ark_relations::gr1cs::ConstraintSystemRef<F>,
+        ) -> ark_relations::gr1cs::Result<()> {
             let a = FpVar::new_witness(cs.clone(), || Ok(self.a))?;
             let b = FpVar::new_witness(cs.clone(), || Ok(self.b))?;
             let c = FpVar::new_input(cs, || Ok(self.c))?;
