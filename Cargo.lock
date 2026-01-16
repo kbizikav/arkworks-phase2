@@ -74,10 +74,34 @@ dependencies = [
 [[package]]
 name = "ark-crypto-primitives"
 version = "0.5.0"
+source = "git+https://github.com/winderica/crypto-primitives?rev=af003fc#af003fc69441d431d714331012b02443738ef5b6"
+dependencies = [
+ "ahash",
+ "ark-crypto-primitives-macros 0.5.0 (git+https://github.com/winderica/crypto-primitives?rev=af003fc)",
+ "ark-ec",
+ "ark-ff",
+ "ark-r1cs-std 0.5.0 (git+https://github.com/winderica/r1cs-std?rev=ae8283a)",
+ "ark-relations",
+ "ark-serialize",
+ "ark-snark",
+ "ark-std 0.5.0 (git+https://github.com/arkworks-rs/std)",
+ "blake2",
+ "derivative",
+ "digest 0.10.7",
+ "fnv",
+ "merlin",
+ "num-bigint",
+ "sha2",
+ "tracing",
+]
+
+[[package]]
+name = "ark-crypto-primitives"
+version = "0.5.0"
 source = "git+https://github.com/arkworks-rs/crypto-primitives.git#39fb17bd6f46366913526c262454b9fce82a4cd7"
 dependencies = [
  "ahash",
- "ark-crypto-primitives-macros",
+ "ark-crypto-primitives-macros 0.5.0 (git+https://github.com/arkworks-rs/crypto-primitives.git)",
  "ark-ec",
  "ark-ff",
  "ark-r1cs-std 0.5.0 (git+https://github.com/arkworks-rs/r1cs-std.git)",
@@ -93,6 +117,16 @@ dependencies = [
  "num-bigint",
  "rayon",
  "sha2",
+]
+
+[[package]]
+name = "ark-crypto-primitives-macros"
+version = "0.5.0"
+source = "git+https://github.com/winderica/crypto-primitives?rev=af003fc#af003fc69441d431d714331012b02443738ef5b6"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
 ]
 
 [[package]]
@@ -169,7 +203,7 @@ name = "ark-groth16"
 version = "0.5.0"
 source = "git+https://github.com/arkworks-rs/groth16?rev=b3b4a15#b3b4a152b2f379930011ad0699b710d3746a552e"
 dependencies = [
- "ark-crypto-primitives",
+ "ark-crypto-primitives 0.5.0 (git+https://github.com/arkworks-rs/crypto-primitives.git)",
  "ark-ec",
  "ark-ff",
  "ark-poly",
@@ -306,6 +340,7 @@ version = "0.1.0"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
+ "ark-crypto-primitives 0.5.0 (git+https://github.com/winderica/crypto-primitives?rev=af003fc)",
  "ark-ec",
  "ark-ff",
  "ark-groth16",

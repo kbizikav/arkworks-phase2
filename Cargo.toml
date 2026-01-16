@@ -39,6 +39,10 @@ ark-snark = { version = "^0.5.0", default-features = false }
 ark-groth16 = { version = "^0.5.0", default-features = false, features = [
     "parallel",
 ] }
+ark-crypto-primitives = { version = "^0.5.0", default-features = false, features = [
+    "constraints",
+    "sponge",
+] }
 criterion = "0.5.1"
 
 [[bench]]
@@ -80,3 +84,4 @@ ark-relations = { git = "https://github.com/arkworks-rs/snark" }
 ark-snark = { git = "https://github.com/arkworks-rs/snark" }
 ark-r1cs-std = { git = "https://github.com/winderica/r1cs-std", rev = "ae8283a" }
 ark-groth16 = { git = "https://github.com/arkworks-rs/groth16", rev = "b3b4a15" }
+ark-crypto-primitives = { git = "https://github.com/winderica/crypto-primitives", rev = "af003fc" }

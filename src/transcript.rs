@@ -1,4 +1,4 @@
-use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
+use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 use ark_ff::{Field, UniformRand};
 use ark_groth16::{ProvingKey, VerifyingKey};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
@@ -120,7 +120,7 @@ impl<E: Pairing> Transcript<E> {
         let specialize_constraints_timer =
             start_timer!(|| "Specializing constraints into phase 2 key (MSM)");
 
-        // Process each witness variable in parallel using MSM
+        // Process each witness variable using batched scalar multiplication
         // a_g1[i] = sum over constraints j: tau_g1[j] * a_matrix[j][i]
         // b_g1[i] = sum over constraints j: tau_g1[j] * b_matrix[j][i]
         // b_g2[i] = sum over constraints j: tau_g2[j] * b_matrix[j][i]
@@ -128,53 +128,71 @@ impl<E: Pairing> Transcript<E> {
         //                                  + alpha_tau[j] * b_matrix[j][i]
         //                                  + tau_g1[j] * c_matrix[j][i])
 
-        let compute_msm_g1 =
-            |entries: &[(usize, E::ScalarField)], bases: &[E::G1Affine]| -> E::G1Affine {
-                if entries.is_empty() {
-                    return E::G1Affine::zero();
-                }
-                let (indices, scalars): (Vec<_>, Vec<_>) = entries.iter().cloned().unzip();
-                let points: Vec<_> = indices.iter().map(|&i| bases[i]).collect();
-                E::G1::msm(&points, &scalars)
-                    .expect("MSM failed")
-                    .into_affine()
-            };
+        // Batched computation for G1 points: parallel over witnesses, using scalar mul + sum
+        // This avoids nested thread pools that cause resource exhaustion while maintaining
+        // good parallelism across witnesses
+        fn batch_compute_g1<E: Pairing>(
+            entries_by_witness: &[Vec<(usize, E::ScalarField)>],
+            bases: &[E::G1Affine],
+        ) -> Vec<E::G1Affine> {
+            cfg_into_iter!(entries_by_witness)
+                .map(|entries| {
+                    if entries.is_empty() {
+                        return E::G1Affine::zero();
+                    }
+                    // Sequential scalar mul and sum within each witness
+                    // Parallelism is at the witness level, not nested
+                    entries
+                        .iter()
+                        .map(|&(idx, scalar)| bases[idx] * scalar)
+                        .sum::<E::G1>()
+                        .into_affine()
+                })
+                .collect()
+        }
 
-        let compute_msm_g2 =
-            |entries: &[(usize, E::ScalarField)], bases: &[E::G2Affine]| -> E::G2Affine {
-                if entries.is_empty() {
-                    return E::G2Affine::zero();
-                }
-                let (indices, scalars): (Vec<_>, Vec<_>) = entries.iter().cloned().unzip();
-                let points: Vec<_> = indices.iter().map(|&i| bases[i]).collect();
-                E::G2::msm(&points, &scalars)
-                    .expect("MSM failed")
-                    .into_affine()
-            };
+        fn batch_compute_g2<E: Pairing>(
+            entries_by_witness: &[Vec<(usize, E::ScalarField)>],
+            bases: &[E::G2Affine],
+        ) -> Vec<E::G2Affine> {
+            cfg_into_iter!(entries_by_witness)
+                .map(|entries| {
+                    if entries.is_empty() {
+                        return E::G2Affine::zero();
+                    }
+                    entries
+                        .iter()
+                        .map(|&(idx, scalar)| bases[idx] * scalar)
+                        .sum::<E::G2>()
+                        .into_affine()
+                })
+                .collect()
+        }
 
-        // Compute queries in parallel for each witness
-        let results: Vec<_> = cfg_into_iter!(0..num_witnesses)
+        // Compute all query types in sequence (each internally parallel over witnesses)
+        let a_g1_timer = start_timer!(|| "Computing a_g1 query");
+        let a_query_results = batch_compute_g1::<E>(&a_by_witness, &tau_lagrange_g1_affine);
+        end_timer!(a_g1_timer);
+
+        let b_g1_timer = start_timer!(|| "Computing b_g1 query");
+        let b_g1_query_results = batch_compute_g1::<E>(&b_by_witness, &tau_lagrange_g1_affine);
+        end_timer!(b_g1_timer);
+
+        let b_g2_timer = start_timer!(|| "Computing b_g2 query");
+        let b_g2_query_results = batch_compute_g2::<E>(&b_by_witness, &tau_lagrange_g2_affine);
+        end_timer!(b_g2_timer);
+
+        let ext_timer = start_timer!(|| "Computing ext query");
+        let ext_a = batch_compute_g1::<E>(&a_by_witness, &beta_lagrange_g1_affine);
+        let ext_b = batch_compute_g1::<E>(&b_by_witness, &alpha_lagrange_g1_affine);
+        let ext_c = batch_compute_g1::<E>(&c_by_witness, &tau_lagrange_g1_affine);
+        end_timer!(ext_timer);
+
+        // Combine ext results and build final result tuples
+        let results: Vec<_> = (0..num_witnesses)
             .map(|i| {
-                let a_entries = &a_by_witness[i];
-                let b_entries = &b_by_witness[i];
-                let c_entries = &c_by_witness[i];
-
-                // a_g1[i] = MSM(tau_g1, a_coeffs)
-                let a_g1_i = compute_msm_g1(a_entries, &tau_lagrange_g1_affine);
-
-                // b_g1[i] = MSM(tau_g1, b_coeffs)
-                let b_g1_i = compute_msm_g1(b_entries, &tau_lagrange_g1_affine);
-
-                // b_g2[i] = MSM(tau_g2, b_coeffs)
-                let b_g2_i = compute_msm_g2(b_entries, &tau_lagrange_g2_affine);
-
-                // ext[i] = MSM(beta_tau, a_coeffs) + MSM(alpha_tau, b_coeffs) + MSM(tau_g1, c_coeffs)
-                let ext_a = compute_msm_g1(a_entries, &beta_lagrange_g1_affine);
-                let ext_b = compute_msm_g1(b_entries, &alpha_lagrange_g1_affine);
-                let ext_c = compute_msm_g1(c_entries, &tau_lagrange_g1_affine);
-                let ext_i = (ext_a + ext_b + ext_c).into_affine();
-
-                (a_g1_i, b_g1_i, b_g2_i, ext_i)
+                let ext_i = (ext_a[i].into_group() + ext_b[i] + ext_c[i]).into_affine();
+                (a_query_results[i], b_g1_query_results[i], b_g2_query_results[i], ext_i)
             })
             .collect();
 
