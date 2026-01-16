@@ -14,7 +14,9 @@ ark-r1cs-std = { version = "^0.5.0", default-features = false }
 ark-std = { version = "^0.5.0", default-features = false }
 ark-relations = { version = "^0.5.0", default-features = false }
 ark-groth16 = { version = "^0.5.0", default-features = false }
-ark-serialize = { version = "^0.5.0", default-features = false, features = ["derive"] }
+ark-serialize = { version = "^0.5.0", default-features = false, features = [
+    "derive",
+] }
 
 rand = "0.8.5"
 thiserror = "1.0.40"
@@ -24,17 +26,47 @@ blake3 = "0.1.3"
 rayon = { version = "^1.7.0", optional = true }
 
 [dev-dependencies]
-ark-std = { version = "^0.5.0", default-features = false, features = ["print-trace"] }
-ark-bn254 = { version = "^0.5.0", default-features = false, features = ["curve"] }
-ark-bls12-381 = { version = "^0.5.0", default-features = false, features = ["curve"] }
+ark-std = { version = "^0.5.0", default-features = false, features = [
+    "print-trace",
+] }
+ark-bn254 = { version = "^0.5.0", default-features = false, features = [
+    "curve",
+] }
+ark-bls12-381 = { version = "^0.5.0", default-features = false, features = [
+    "curve",
+] }
 ark-snark = { version = "^0.5.0", default-features = false }
-ark-groth16 = { version = "^0.5.0", default-features = false, features = ["parallel"] }
+ark-groth16 = { version = "^0.5.0", default-features = false, features = [
+    "parallel",
+] }
+criterion = "0.5.1"
+
+[[bench]]
+name = "setup"
+harness = false
 
 [features]
-default = ["std"]
+default = ["std", "parallel"]
 no-std = []
-parallel = ["rayon", "ark-ff/parallel", "ark-ec/parallel", "ark-std/parallel", "ark-r1cs-std/parallel", "ark-poly/parallel", "ark-groth16/parallel"]
-std = ["ark-std/std", "ark-ff/std", "ark-ec/std", "ark-r1cs-std/std", "ark-poly/std", "ark-relations/std", "ark-groth16/std", "ark-serialize/std"]
+parallel = [
+    "rayon",
+    "ark-ff/parallel",
+    "ark-ec/parallel",
+    "ark-std/parallel",
+    "ark-r1cs-std/parallel",
+    "ark-poly/parallel",
+    "ark-groth16/parallel",
+]
+std = [
+    "ark-std/std",
+    "ark-ff/std",
+    "ark-ec/std",
+    "ark-r1cs-std/std",
+    "ark-poly/std",
+    "ark-relations/std",
+    "ark-groth16/std",
+    "ark-serialize/std",
+]
 
 [patch.crates-io]
 ark-ff = { git = "https://github.com/arkworks-rs/algebra" }

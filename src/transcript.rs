@@ -1,7 +1,5 @@
-use std::sync::{Arc, Mutex};
-
-use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
-use ark_ff::{Field, UniformRand, Zero};
+use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
+use ark_ff::{Field, UniformRand};
 use ark_groth16::{ProvingKey, VerifyingKey};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use ark_relations::gr1cs::{
@@ -9,7 +7,7 @@ use ark_relations::gr1cs::{
     R1CS_PREDICATE_LABEL,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::{cfg_iter, end_timer, start_timer};
+use ark_std::{cfg_into_iter, end_timer, start_timer};
 use rand::Rng;
 
 use crate::{
@@ -27,6 +25,9 @@ use crate::{
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+type SparseRow<F> = Vec<(F, usize)>;
+type SparseMatrix<F> = Vec<SparseRow<F>>;
+
 #[derive(CanonicalSerialize, CanonicalDeserialize, Debug, Clone, PartialEq)]
 pub struct Transcript<E: Pairing> {
     pub key: FullKey<E>,
@@ -35,9 +36,7 @@ pub struct Transcript<E: Pairing> {
 }
 
 impl<E: Pairing> Transcript<E> {
-    fn r1cs_constraint_count(
-        cs: &ConstraintSystemRef<E::ScalarField>,
-    ) -> Result<usize, Error> {
+    fn r1cs_constraint_count(cs: &ConstraintSystemRef<E::ScalarField>) -> Result<usize, Error> {
         let r1cs_constraints = cs
             .get_predicates_num_constraints(R1CS_PREDICATE_LABEL)
             .ok_or_else(|| Error::Custom("missing R1CS predicate".to_string()))?;
@@ -52,6 +51,22 @@ impl<E: Pairing> Transcript<E> {
         }
 
         Ok(r1cs_constraints)
+    }
+
+    /// Transpose a sparse matrix from constraint-indexed to witness-indexed representation.
+    /// Returns a vector where each element contains (constraint_index, coefficient) pairs
+    /// for a given witness variable.
+    fn transpose_matrix<F: Field>(
+        matrix: &SparseMatrix<F>,
+        num_witnesses: usize,
+    ) -> Vec<Vec<(usize, F)>> {
+        let mut transposed = vec![Vec::new(); num_witnesses];
+        for (constraint_idx, row) in matrix.iter().enumerate() {
+            for (coeff, witness_idx) in row {
+                transposed[*witness_idx].push((constraint_idx, *coeff));
+            }
+        }
+        transposed
     }
 
     fn new_from_prepared_accumulator_finalized_cs(
@@ -86,49 +101,105 @@ impl<E: Pairing> Transcript<E> {
         let num_instance_variables = cs.num_instance_variables();
         let num_witness_variables = cs.num_witness_variables();
         let num_witnesses = num_instance_variables + num_witness_variables;
-        let a_g1 = Arc::new(Mutex::new(vec![E::G1::zero(); num_witnesses]));
-        let b_g1 = Arc::new(Mutex::new(vec![E::G1::zero(); num_witnesses]));
-        let b_g2 = Arc::new(Mutex::new(vec![E::G2::zero(); num_witnesses]));
-        let ext = Arc::new(Mutex::new(vec![E::G1::zero(); num_witnesses]));
 
-        let add_dummy_constraints_timer = start_timer!(|| "Adding dummy constraints");
-        a_g1.lock()?[0..num_instance_variables]
-            .clone_from_slice(&accum.tau_lagrange_g1[num_constraints..total_constraints]);
-        ext.lock()?[0..num_instance_variables]
-            .clone_from_slice(&accum.beta_lagrange_g1[num_constraints..total_constraints]);
-        end_timer!(add_dummy_constraints_timer);
+        // Transpose matrices: from constraint-indexed to witness-indexed
+        let transpose_timer = start_timer!(|| "Transposing constraint matrices");
+        let a_by_witness = Self::transpose_matrix(a_matrix, num_witnesses);
+        let b_by_witness = Self::transpose_matrix(b_matrix, num_witnesses);
+        let c_by_witness = Self::transpose_matrix(c_matrix, num_witnesses);
+        end_timer!(transpose_timer);
+
+        // Convert projective to affine for MSM
+        let convert_timer = start_timer!(|| "Converting to affine for MSM");
+        let tau_lagrange_g1_affine = batch_into_affine(&accum.tau_lagrange_g1);
+        let tau_lagrange_g2_affine = batch_into_affine(&accum.tau_lagrange_g2);
+        let alpha_lagrange_g1_affine = batch_into_affine(&accum.alpha_lagrange_g1);
+        let beta_lagrange_g1_affine = batch_into_affine(&accum.beta_lagrange_g1);
+        end_timer!(convert_timer);
 
         let specialize_constraints_timer =
-            start_timer!(|| "Specializing constraints into phase 2 key");
-        cfg_iter!(a_matrix)
-            .zip(cfg_iter!(b_matrix))
-            .zip(cfg_iter!(c_matrix))
-            .zip(cfg_iter!(accum.tau_lagrange_g1))
-            .zip(cfg_iter!(accum.tau_lagrange_g2))
-            .zip(cfg_iter!(accum.alpha_lagrange_g1))
-            .zip(cfg_iter!(accum.beta_lagrange_g1))
-            .for_each(
-                |((((((a_poly, b_poly), c_poly), tau_g1), tau_g2), alpha_tau), beta_tau)| {
-                    cfg_iter!(a_poly).for_each(|(coeff, index)| {
-                        a_g1.lock().unwrap()[*index] += *tau_g1 * *coeff;
-                        ext.lock().unwrap()[*index] += *beta_tau * *coeff;
-                    });
-                    cfg_iter!(b_poly).for_each(|(coeff, index)| {
-                        b_g1.lock().unwrap()[*index] += *tau_g1 * *coeff;
-                        b_g2.lock().unwrap()[*index] += *tau_g2 * *coeff;
-                        ext.lock().unwrap()[*index] += *alpha_tau * *coeff;
-                    });
-                    cfg_iter!(c_poly).for_each(|(coeff, index)| {
-                        ext.lock().unwrap()[*index] += *tau_g1 * *coeff;
-                    });
-                },
-            );
-        end_timer!(specialize_constraints_timer);
+            start_timer!(|| "Specializing constraints into phase 2 key (MSM)");
 
-        let a_query = batch_into_affine(&a_g1.lock()?);
-        let b_g1_query = batch_into_affine(&b_g1.lock()?);
-        let b_g2_query = batch_into_affine(&b_g2.lock()?);
-        let ext = batch_into_affine(&ext.lock()?);
+        // Process each witness variable in parallel using MSM
+        // a_g1[i] = sum over constraints j: tau_g1[j] * a_matrix[j][i]
+        // b_g1[i] = sum over constraints j: tau_g1[j] * b_matrix[j][i]
+        // b_g2[i] = sum over constraints j: tau_g2[j] * b_matrix[j][i]
+        // ext[i]  = sum over constraints j: (beta_tau[j] * a_matrix[j][i]
+        //                                  + alpha_tau[j] * b_matrix[j][i]
+        //                                  + tau_g1[j] * c_matrix[j][i])
+
+        let compute_msm_g1 =
+            |entries: &[(usize, E::ScalarField)], bases: &[E::G1Affine]| -> E::G1Affine {
+                if entries.is_empty() {
+                    return E::G1Affine::zero();
+                }
+                let (indices, scalars): (Vec<_>, Vec<_>) = entries.iter().cloned().unzip();
+                let points: Vec<_> = indices.iter().map(|&i| bases[i]).collect();
+                E::G1::msm(&points, &scalars)
+                    .expect("MSM failed")
+                    .into_affine()
+            };
+
+        let compute_msm_g2 =
+            |entries: &[(usize, E::ScalarField)], bases: &[E::G2Affine]| -> E::G2Affine {
+                if entries.is_empty() {
+                    return E::G2Affine::zero();
+                }
+                let (indices, scalars): (Vec<_>, Vec<_>) = entries.iter().cloned().unzip();
+                let points: Vec<_> = indices.iter().map(|&i| bases[i]).collect();
+                E::G2::msm(&points, &scalars)
+                    .expect("MSM failed")
+                    .into_affine()
+            };
+
+        // Compute queries in parallel for each witness
+        let results: Vec<_> = cfg_into_iter!(0..num_witnesses)
+            .map(|i| {
+                let a_entries = &a_by_witness[i];
+                let b_entries = &b_by_witness[i];
+                let c_entries = &c_by_witness[i];
+
+                // a_g1[i] = MSM(tau_g1, a_coeffs)
+                let a_g1_i = compute_msm_g1(a_entries, &tau_lagrange_g1_affine);
+
+                // b_g1[i] = MSM(tau_g1, b_coeffs)
+                let b_g1_i = compute_msm_g1(b_entries, &tau_lagrange_g1_affine);
+
+                // b_g2[i] = MSM(tau_g2, b_coeffs)
+                let b_g2_i = compute_msm_g2(b_entries, &tau_lagrange_g2_affine);
+
+                // ext[i] = MSM(beta_tau, a_coeffs) + MSM(alpha_tau, b_coeffs) + MSM(tau_g1, c_coeffs)
+                let ext_a = compute_msm_g1(a_entries, &beta_lagrange_g1_affine);
+                let ext_b = compute_msm_g1(b_entries, &alpha_lagrange_g1_affine);
+                let ext_c = compute_msm_g1(c_entries, &tau_lagrange_g1_affine);
+                let ext_i = (ext_a + ext_b + ext_c).into_affine();
+
+                (a_g1_i, b_g1_i, b_g2_i, ext_i)
+            })
+            .collect();
+
+        // Unzip results
+        let mut a_query: Vec<E::G1Affine> = Vec::with_capacity(num_witnesses);
+        let mut b_g1_query: Vec<E::G1Affine> = Vec::with_capacity(num_witnesses);
+        let mut b_g2_query: Vec<E::G2Affine> = Vec::with_capacity(num_witnesses);
+        let mut ext: Vec<E::G1Affine> = Vec::with_capacity(num_witnesses);
+
+        for (a, b1, b2, e) in results {
+            a_query.push(a);
+            b_g1_query.push(b1);
+            b_g2_query.push(b2);
+            ext.push(e);
+        }
+
+        // Add dummy constraints for instance variables
+        let add_dummy_constraints_timer = start_timer!(|| "Adding dummy constraints");
+        for i in 0..num_instance_variables {
+            a_query[i] = (a_query[i] + tau_lagrange_g1_affine[num_constraints + i]).into_affine();
+            ext[i] = (ext[i] + beta_lagrange_g1_affine[num_constraints + i]).into_affine();
+        }
+        end_timer!(add_dummy_constraints_timer);
+
+        end_timer!(specialize_constraints_timer);
 
         let public_cross_terms = ext[..num_instance_variables].to_vec();
         let private_cross_terms = ext[num_instance_variables..].to_vec();
@@ -371,9 +442,9 @@ mod tests {
     use super::Transcript;
     use crate::{accumulator::Accumulator, error::Error};
     use ark_bn254::{Bn254, Fr};
-    use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-    use ark_relations::gr1cs::predicate::PredicateConstraintSystem;
     use ark_relations::gr1cs::predicate::polynomial_constraint::SR1CS_PREDICATE_LABEL;
+    use ark_relations::gr1cs::predicate::PredicateConstraintSystem;
+    use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
     use ark_relations::lc;
 
     struct Sr1csCircuit;
