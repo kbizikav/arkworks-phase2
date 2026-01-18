@@ -566,6 +566,61 @@ impl<E: Pairing> PreparedAccumulator<E> {
             h_query,
         })
     }
+
+    /// Load a prepared accumulator from a file using memory-mapped I/O.
+    /// This is faster than `load` for large files as it avoids copying data.
+    pub fn load_mmap<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+        use memmap2::Mmap;
+
+        let timer = start_timer!(|| "Loading prepared accumulator (mmap)");
+
+        let file = File::open(path)?;
+        let mmap_timer = start_timer!(|| "Memory mapping file");
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| Error::Custom(e.to_string()))?;
+        end_timer!(mmap_timer);
+
+        let mut cursor = std::io::Cursor::new(&mmap[..]);
+
+        let deserialize_timer = start_timer!(|| "Deserializing");
+        let alpha = E::G1Affine::deserialize_compressed(&mut cursor)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let beta = E::G1Affine::deserialize_compressed(&mut cursor)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let beta_g2 = E::G2Affine::deserialize_compressed(&mut cursor)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let tau_g1_affine: Vec<E::G1Affine> = Vec::deserialize_compressed(&mut cursor)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let tau_g2_affine: Vec<E::G2Affine> = Vec::deserialize_compressed(&mut cursor)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let alpha_g1_affine: Vec<E::G1Affine> = Vec::deserialize_compressed(&mut cursor)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let beta_g1_affine: Vec<E::G1Affine> = Vec::deserialize_compressed(&mut cursor)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let h_query: Vec<E::G1Affine> = Vec::deserialize_compressed(&mut cursor)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        end_timer!(deserialize_timer);
+
+        // Convert affine points back to projective
+        let convert_timer = start_timer!(|| "Converting to projective");
+        let tau_lagrange_g1 = batch_into_projective(&tau_g1_affine);
+        let tau_lagrange_g2 = batch_into_projective(&tau_g2_affine);
+        let alpha_lagrange_g1 = batch_into_projective(&alpha_g1_affine);
+        let beta_lagrange_g1 = batch_into_projective(&beta_g1_affine);
+        end_timer!(convert_timer);
+
+        end_timer!(timer);
+
+        Ok(Self {
+            alpha,
+            beta,
+            tau_lagrange_g1,
+            tau_lagrange_g2,
+            alpha_lagrange_g1,
+            beta_lagrange_g1,
+            beta_g2,
+            h_query,
+        })
+    }
 }
 
 impl<E: Pairing + PairingReader> PreparedAccumulator<E> {
