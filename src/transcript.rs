@@ -73,12 +73,19 @@ impl<E: Pairing> Transcript<E> {
         accum: &PreparedAccumulator<E>,
         cs: ConstraintSystemRef<E::ScalarField>,
     ) -> Result<Self, Error> {
+        use std::time::Instant;
+
         let timer = start_timer!(|| "Generating transcript from prepared accumulator");
+        eprintln!("[new_from_prepared_accumulator_finalized_cs] Starting...");
 
         let num_constraints = Self::r1cs_constraint_count(&cs)?;
         let num_instance_variables = cs.num_instance_variables();
         let total_constraints = num_constraints + num_instance_variables;
+
+        let t_matrices = Instant::now();
         let constraint_matrices = cs.to_matrices()?;
+        eprintln!("[new_from_prepared_accumulator_finalized_cs] cs.to_matrices: {:?}", t_matrices.elapsed());
+
         let r1cs_matrices = constraint_matrices
             .get(R1CS_PREDICATE_LABEL)
             .ok_or(Error::MissingCSMatrices)?;
@@ -101,21 +108,26 @@ impl<E: Pairing> Transcript<E> {
         let num_instance_variables = cs.num_instance_variables();
         let num_witness_variables = cs.num_witness_variables();
         let num_witnesses = num_instance_variables + num_witness_variables;
+        eprintln!("[new_from_prepared_accumulator_finalized_cs] num_witnesses={}", num_witnesses);
 
         // Transpose matrices: from constraint-indexed to witness-indexed
         let transpose_timer = start_timer!(|| "Transposing constraint matrices");
+        let t_transpose = Instant::now();
         let a_by_witness = Self::transpose_matrix(a_matrix, num_witnesses);
         let b_by_witness = Self::transpose_matrix(b_matrix, num_witnesses);
         let c_by_witness = Self::transpose_matrix(c_matrix, num_witnesses);
         end_timer!(transpose_timer);
+        eprintln!("[new_from_prepared_accumulator_finalized_cs] transpose_matrix: {:?}", t_transpose.elapsed());
 
         // Convert projective to affine for MSM
         let convert_timer = start_timer!(|| "Converting to affine for MSM");
+        let t_convert = Instant::now();
         let tau_lagrange_g1_affine = batch_into_affine(&accum.tau_lagrange_g1);
         let tau_lagrange_g2_affine = batch_into_affine(&accum.tau_lagrange_g2);
         let alpha_lagrange_g1_affine = batch_into_affine(&accum.alpha_lagrange_g1);
         let beta_lagrange_g1_affine = batch_into_affine(&accum.beta_lagrange_g1);
         end_timer!(convert_timer);
+        eprintln!("[new_from_prepared_accumulator_finalized_cs] batch_into_affine: {:?}", t_convert.elapsed());
 
         let specialize_constraints_timer =
             start_timer!(|| "Specializing constraints into phase 2 key (MSM)");
@@ -171,22 +183,30 @@ impl<E: Pairing> Transcript<E> {
 
         // Compute all query types in sequence (each internally parallel over witnesses)
         let a_g1_timer = start_timer!(|| "Computing a_g1 query");
+        let t_a_g1 = Instant::now();
         let a_query_results = batch_compute_g1::<E>(&a_by_witness, &tau_lagrange_g1_affine);
         end_timer!(a_g1_timer);
+        eprintln!("[new_from_prepared_accumulator_finalized_cs] a_g1 query: {:?}", t_a_g1.elapsed());
 
         let b_g1_timer = start_timer!(|| "Computing b_g1 query");
+        let t_b_g1 = Instant::now();
         let b_g1_query_results = batch_compute_g1::<E>(&b_by_witness, &tau_lagrange_g1_affine);
         end_timer!(b_g1_timer);
+        eprintln!("[new_from_prepared_accumulator_finalized_cs] b_g1 query: {:?}", t_b_g1.elapsed());
 
         let b_g2_timer = start_timer!(|| "Computing b_g2 query");
+        let t_b_g2 = Instant::now();
         let b_g2_query_results = batch_compute_g2::<E>(&b_by_witness, &tau_lagrange_g2_affine);
         end_timer!(b_g2_timer);
+        eprintln!("[new_from_prepared_accumulator_finalized_cs] b_g2 query: {:?}", t_b_g2.elapsed());
 
         let ext_timer = start_timer!(|| "Computing ext query");
+        let t_ext = Instant::now();
         let ext_a = batch_compute_g1::<E>(&a_by_witness, &beta_lagrange_g1_affine);
         let ext_b = batch_compute_g1::<E>(&b_by_witness, &alpha_lagrange_g1_affine);
         let ext_c = batch_compute_g1::<E>(&c_by_witness, &tau_lagrange_g1_affine);
         end_timer!(ext_timer);
+        eprintln!("[new_from_prepared_accumulator_finalized_cs] ext query: {:?}", t_ext.elapsed());
 
         // Combine ext results and build final result tuples
         let results: Vec<_> = (0..num_witnesses)
@@ -283,13 +303,21 @@ impl<E: Pairing> Transcript<E> {
         accum: &Accumulator<E>,
         circuit: C,
     ) -> Result<Self, Error> {
+        use std::time::Instant;
+
+        eprintln!("[new_from_accumulator] Starting...");
+
+        let t0 = Instant::now();
         let cs = ConstraintSystem::new_ref();
         circuit.generate_constraints(cs.clone())?;
         cs.finalize();
+        eprintln!("[new_from_accumulator] ConstraintSystem generate_constraints: {:?}", t0.elapsed());
 
         let num_constraints = Self::r1cs_constraint_count(&cs)?;
         let num_instance_variables = cs.num_instance_variables();
         let total_constraints = num_constraints + num_instance_variables;
+        eprintln!("[new_from_accumulator] num_constraints={}, num_instance_variables={}, total_constraints={}",
+                  num_constraints, num_instance_variables, total_constraints);
 
         let (valid, g1_len, g2_len) = accum.check_pow_len();
         valid.then_some(()).ok_or(Error::InvalidPOTSize)?;
@@ -297,12 +325,21 @@ impl<E: Pairing> Transcript<E> {
         let domain = Radix2EvaluationDomain::<E::ScalarField>::new(total_constraints)
             .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
         let size = domain.size();
+        eprintln!("[new_from_accumulator] domain size={}", size);
 
         (g2_len >= total_constraints && g1_len >= size)
             .then_some(())
             .ok_or(Error::NotEnoughPOTDegree(ark_std::log2(total_constraints)))?;
 
-        Self::new_from_prepared_accumulator_finalized_cs(&accum.prepare_with_size(size)?, cs)
+        let t1 = Instant::now();
+        let prepared = accum.prepare_with_size(size)?;
+        eprintln!("[new_from_accumulator] prepare_with_size: {:?}", t1.elapsed());
+
+        let t2 = Instant::now();
+        let result = Self::new_from_prepared_accumulator_finalized_cs(&prepared, cs);
+        eprintln!("[new_from_accumulator] new_from_prepared_accumulator_finalized_cs: {:?}", t2.elapsed());
+
+        result
     }
 
     pub fn contribute_seed(&mut self, seed: &[u8]) -> Result<(), Error> {
@@ -421,6 +458,17 @@ impl<E: Pairing> Transcript<E> {
         circuit: C,
     ) -> Result<(), Error> {
         let initial_transcript = Transcript::new_from_accumulator(accum, circuit)?;
+        self.verify_from_initial_transcript(&initial_transcript)
+    }
+
+    /// Verify transcript against a pre-computed initial transcript.
+    /// This is much faster than verify_from_accumulator as it skips the expensive
+    /// IFFT and MSM computations needed to regenerate the initial transcript.
+    #[inline]
+    pub fn verify_from_initial_transcript(
+        &self,
+        initial_transcript: &Transcript<E>,
+    ) -> Result<(), Error> {
         (initial_transcript.initial_key == self.initial_key)
             .then_some(())
             .ok_or(Error::InvalidKey("initial_key"))?;

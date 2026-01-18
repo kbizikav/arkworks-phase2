@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{BufReader, Read, Seek, SeekFrom},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     iter,
     path::Path,
 };
@@ -10,6 +10,7 @@ use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 use ark_ff::{BigInteger, One, PrimeField, UniformRand};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use ark_relations::gr1cs::SynthesisError;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{add_to_trace, cfg_into_iter, cfg_iter_mut, end_timer, start_timer};
 use rand::Rng;
 
@@ -33,7 +34,10 @@ pub struct Accumulator<E: Pairing> {
 
 impl<E: Pairing> Accumulator<E> {
     pub fn prepare_with_size(&self, size: usize) -> Result<PreparedAccumulator<E>, Error> {
+        use std::time::Instant;
+
         let timer = start_timer!(|| "Preparing accumulator");
+        eprintln!("[prepare_with_size] Starting with size={}", size);
 
         let (_, g1_len, g2_len) = self.check_pow_len();
 
@@ -46,6 +50,7 @@ impl<E: Pairing> Accumulator<E> {
             .ok_or(Error::NotEnoughPOTDegree(ark_std::log2(size)))?;
 
         let h_query_timer = start_timer!(|| "Computing h_query");
+        let t0 = Instant::now();
         let h_query = cfg_into_iter!(0..size - 1)
             .map(|i| {
                 (self.tau_powers_g1[i + size].into_group()
@@ -54,24 +59,33 @@ impl<E: Pairing> Accumulator<E> {
             })
             .collect::<Vec<_>>();
         end_timer!(h_query_timer);
+        eprintln!("[prepare_with_size] h_query (size-1={}): {:?}", size - 1, t0.elapsed());
 
         let tau_lagrange_g1_timer = start_timer!(|| "Computing inverse fft to tau_lagrange_g1");
+        let t1 = Instant::now();
         let tau_lagrange_g1 = domain.ifft(&batch_into_projective(&self.tau_powers_g1[..size]));
         end_timer!(tau_lagrange_g1_timer);
+        eprintln!("[prepare_with_size] tau_lagrange_g1 ifft: {:?}", t1.elapsed());
 
         let tau_lagrange_g2_timer = start_timer!(|| "Computing inverse fft to tau_lagrange_g2");
+        let t2 = Instant::now();
         let tau_lagrange_g2 = domain.ifft(&batch_into_projective(&self.tau_powers_g2[..size]));
         end_timer!(tau_lagrange_g2_timer);
+        eprintln!("[prepare_with_size] tau_lagrange_g2 ifft: {:?}", t2.elapsed());
 
         let alpha_lagrange_g1_timer = start_timer!(|| "Computing inverse fft to alpha_lagrange_g1");
+        let t3 = Instant::now();
         let alpha_lagrange_g1 =
             domain.ifft(&batch_into_projective(&self.alpha_tau_powers_g1[..size]));
         end_timer!(alpha_lagrange_g1_timer);
+        eprintln!("[prepare_with_size] alpha_lagrange_g1 ifft: {:?}", t3.elapsed());
 
         let beta_lagrange_g1_timer = start_timer!(|| "Computing inverse fft to beta_lagrange_g1");
+        let t4 = Instant::now();
         let beta_lagrange_g1 =
             domain.ifft(&batch_into_projective(&self.beta_tau_powers_g1[..size]));
         end_timer!(beta_lagrange_g1_timer);
+        eprintln!("[prepare_with_size] beta_lagrange_g1 ifft: {:?}", t4.elapsed());
 
         end_timer!(timer);
 
@@ -455,6 +469,102 @@ impl<E: Pairing> PreparedAccumulator<E> {
                 && (len - 1) == self.h_query.len(),
             len,
         )
+    }
+
+    /// Save the prepared accumulator to a file.
+    /// Points are converted to affine form for efficient storage.
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
+        let timer = start_timer!(|| "Saving prepared accumulator");
+
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+
+        // Convert projective points to affine for serialization
+        let convert_timer = start_timer!(|| "Converting to affine");
+        let tau_g1_affine = batch_into_affine(&self.tau_lagrange_g1);
+        let tau_g2_affine = batch_into_affine(&self.tau_lagrange_g2);
+        let alpha_g1_affine = batch_into_affine(&self.alpha_lagrange_g1);
+        let beta_g1_affine = batch_into_affine(&self.beta_lagrange_g1);
+        end_timer!(convert_timer);
+
+        let serialize_timer = start_timer!(|| "Serializing");
+        self.alpha
+            .serialize_compressed(&mut writer)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        self.beta
+            .serialize_compressed(&mut writer)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        self.beta_g2
+            .serialize_compressed(&mut writer)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        tau_g1_affine
+            .serialize_compressed(&mut writer)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        tau_g2_affine
+            .serialize_compressed(&mut writer)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        alpha_g1_affine
+            .serialize_compressed(&mut writer)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        beta_g1_affine
+            .serialize_compressed(&mut writer)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        self.h_query
+            .serialize_compressed(&mut writer)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        end_timer!(serialize_timer);
+
+        writer.flush()?;
+        end_timer!(timer);
+        Ok(())
+    }
+
+    /// Load a prepared accumulator from a file.
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+        let timer = start_timer!(|| "Loading prepared accumulator");
+
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+
+        let deserialize_timer = start_timer!(|| "Deserializing");
+        let alpha = E::G1Affine::deserialize_compressed(&mut reader)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let beta = E::G1Affine::deserialize_compressed(&mut reader)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let beta_g2 = E::G2Affine::deserialize_compressed(&mut reader)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let tau_g1_affine: Vec<E::G1Affine> = Vec::deserialize_compressed(&mut reader)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let tau_g2_affine: Vec<E::G2Affine> = Vec::deserialize_compressed(&mut reader)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let alpha_g1_affine: Vec<E::G1Affine> = Vec::deserialize_compressed(&mut reader)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let beta_g1_affine: Vec<E::G1Affine> = Vec::deserialize_compressed(&mut reader)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        let h_query: Vec<E::G1Affine> = Vec::deserialize_compressed(&mut reader)
+            .map_err(|e| Error::Custom(e.to_string()))?;
+        end_timer!(deserialize_timer);
+
+        // Convert affine points back to projective
+        let convert_timer = start_timer!(|| "Converting to projective");
+        let tau_lagrange_g1 = batch_into_projective(&tau_g1_affine);
+        let tau_lagrange_g2 = batch_into_projective(&tau_g2_affine);
+        let alpha_lagrange_g1 = batch_into_projective(&alpha_g1_affine);
+        let beta_lagrange_g1 = batch_into_projective(&beta_g1_affine);
+        end_timer!(convert_timer);
+
+        end_timer!(timer);
+
+        Ok(Self {
+            alpha,
+            beta,
+            tau_lagrange_g1,
+            tau_lagrange_g2,
+            alpha_lagrange_g1,
+            beta_lagrange_g1,
+            beta_g2,
+            h_query,
+        })
     }
 }
 
