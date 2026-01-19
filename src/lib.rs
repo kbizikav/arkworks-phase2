@@ -24,7 +24,11 @@ mod tests {
     use ark_snark::SNARK;
     use rand::rngs::OsRng;
 
-    use crate::{accumulator::Accumulator, transcript::Transcript, utils::serialize_uncompressed};
+    use crate::{
+        accumulator::Accumulator,
+        transcript::{ContributionContext, Transcript},
+        utils::serialize_uncompressed,
+    };
 
     const NUM_CONSTRAINTS: usize = 50;
 
@@ -52,6 +56,21 @@ mod tests {
         }
     }
 
+    // Test helper: create a mock signature (all zeros is not a valid signature, but we can use it for basic tests)
+    fn mock_sign(_message: &[u8; 32]) -> Result<[u8; 65], crate::error::Error> {
+        // This is a mock signature - not valid for real verification
+        // In production, this would use a real Ethereum signing key
+        Ok([0u8; 65])
+    }
+
+    // Test helper: create a test address
+    fn test_address() -> [u8; 20] {
+        [
+            0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        ]
+    }
+
     #[test]
     fn groth16_domain() -> Result<(), Box<dyn Error>> {
         let rng = &mut OsRng;
@@ -68,10 +87,12 @@ mod tests {
             },
         )?;
 
-        transcript.contribute_seed(b"ofekwoo")?;
+        let context1 = ContributionContext::new("test-ceremony", 1, "test-circuit");
+        transcript.contribute_seed(b"ofekwoo", test_address(), mock_sign, &context1)?;
         transcript.verify()?;
 
-        transcript.contribute_seed(b"aewrog")?;
+        let context2 = ContributionContext::new("test-ceremony", 2, "test-circuit");
+        transcript.contribute_seed(b"aewrog", test_address(), mock_sign, &context2)?;
         transcript.verify()?;
 
         let pk = transcript.key.key;

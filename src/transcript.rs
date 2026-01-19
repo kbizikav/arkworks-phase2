@@ -1,3 +1,4 @@
+use alloy_primitives::keccak256;
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 use ark_ff::{Field, UniformRand};
 use ark_groth16::{ProvingKey, VerifyingKey};
@@ -18,7 +19,7 @@ use crate::{
     ratio::RatioProof,
     utils::{
         batch_into_affine, batch_mul_fixed_scalar, merge_ratio_affine_vec, same_ratio_swap,
-        seeded_rng,
+        seeded_rng, serialize,
     },
 };
 
@@ -27,6 +28,73 @@ use rayon::prelude::*;
 
 type SparseRow<F> = Vec<(F, usize)>;
 type SparseMatrix<F> = Vec<SparseRow<F>>;
+
+/// Context for Ethereum signature during contribution.
+/// Used to construct the message that will be signed.
+#[derive(Debug, Clone)]
+pub struct ContributionContext {
+    /// Ceremony identifier (prevents replay across ceremonies)
+    pub ceremony_id: String,
+    /// Contribution step number (prevents replay within ceremony)
+    pub step: u64,
+    /// Circuit type identifier (prevents cross-circuit attacks)
+    pub circuit: String,
+}
+
+impl ContributionContext {
+    pub fn new(ceremony_id: impl Into<String>, step: u64, circuit: impl Into<String>) -> Self {
+        Self {
+            ceremony_id: ceremony_id.into(),
+            step,
+            circuit: circuit.into(),
+        }
+    }
+}
+
+/// Compute the message to be signed for a contribution.
+/// message = keccak256(ceremony_id, step, circuit, delta_g2_serialized)
+pub fn compute_contribution_message<E: Pairing>(
+    context: &ContributionContext,
+    delta_g2: &E::G2Affine,
+) -> Result<[u8; 32], Error> {
+    let delta_g2_bytes = serialize(delta_g2)?;
+
+    let mut data = Vec::new();
+    data.extend_from_slice(context.ceremony_id.as_bytes());
+    data.extend_from_slice(&context.step.to_le_bytes());
+    data.extend_from_slice(context.circuit.as_bytes());
+    data.extend_from_slice(&delta_g2_bytes);
+
+    Ok(keccak256(&data).into())
+}
+
+/// Verify an Ethereum signature and recover the signer's address.
+/// Returns the recovered address if verification succeeds.
+pub fn recover_eth_address(message_hash: &[u8; 32], signature: &[u8; 65]) -> Result<[u8; 20], Error> {
+    use alloy_primitives::Signature;
+
+    // Parse the signature (r, s, v format)
+    let sig = Signature::try_from(signature.as_slice())
+        .map_err(|_| Error::InvalidEthSignature)?;
+
+    // Apply EIP-191 personal sign prefix
+    let prefixed_hash = eip191_hash(message_hash);
+
+    // Recover the address
+    let recovered = sig
+        .recover_address_from_prehash(&prefixed_hash)
+        .map_err(|_| Error::InvalidEthSignature)?;
+
+    Ok(recovered.into_array())
+}
+
+/// Apply EIP-191 personal sign prefix: keccak256("\x19Ethereum Signed Message:\n32" + message)
+fn eip191_hash(message: &[u8; 32]) -> alloy_primitives::B256 {
+    let mut data = Vec::with_capacity(28 + 32);
+    data.extend_from_slice(b"\x19Ethereum Signed Message:\n32");
+    data.extend_from_slice(message);
+    keccak256(&data)
+}
 
 #[derive(CanonicalSerialize, CanonicalDeserialize, Debug, Clone, PartialEq)]
 pub struct Transcript<E: Pairing> {
@@ -347,11 +415,43 @@ impl<E: Pairing> Transcript<E> {
         result
     }
 
-    pub fn contribute_seed(&mut self, seed: &[u8]) -> Result<(), Error> {
-        self.contribute_rng(&mut seeded_rng(seed))
+    /// Contribute with deterministic seed and Ethereum signature (required).
+    ///
+    /// # Arguments
+    /// * `seed` - Seed for deterministic randomness
+    /// * `eth_address` - Contributor's Ethereum address (20 bytes)
+    /// * `sign_fn` - Callback to sign the contribution message (returns 65-byte signature)
+    /// * `context` - Contribution context for signature message construction
+    pub fn contribute_seed<F>(
+        &mut self,
+        seed: &[u8],
+        eth_address: [u8; 20],
+        sign_fn: F,
+        context: &ContributionContext,
+    ) -> Result<(), Error>
+    where
+        F: FnOnce(&[u8; 32]) -> Result<[u8; 65], Error>,
+    {
+        self.contribute_rng(&mut seeded_rng(seed), eth_address, sign_fn, context)
     }
 
-    pub fn contribute_rng<R: Rng>(&mut self, rng: &mut R) -> Result<(), Error> {
+    /// Contribute with random entropy and Ethereum signature (required).
+    ///
+    /// # Arguments
+    /// * `rng` - Random number generator
+    /// * `eth_address` - Contributor's Ethereum address (20 bytes)
+    /// * `sign_fn` - Callback to sign the contribution message (returns 65-byte signature)
+    /// * `context` - Contribution context for signature message construction
+    pub fn contribute_rng<R: Rng, F>(
+        &mut self,
+        rng: &mut R,
+        eth_address: [u8; 20],
+        sign_fn: F,
+        context: &ContributionContext,
+    ) -> Result<(), Error>
+    where
+        F: FnOnce(&[u8; 32]) -> Result<[u8; 65], Error>,
+    {
         let timer = start_timer!(|| "Contributing to transcript");
 
         let delta = E::ScalarField::rand(rng);
@@ -369,9 +469,18 @@ impl<E: Pairing> Transcript<E> {
 
         self.key.key.delta_g1 = (self.key.key.delta_g1 * delta).into_affine();
         self.key.key.vk.delta_g2 = (self.key.key.vk.delta_g2 * delta).into_affine();
+
+        // Compute the message to be signed
+        let message_hash = compute_contribution_message::<E>(context, &self.key.key.vk.delta_g2)?;
+
+        // Sign the message
+        let eth_signature = sign_fn(&message_hash)?;
+
         self.contributions.push(PublicKey {
             delta_g2: self.key.key.vk.delta_g2,
             proof,
+            eth_address,
+            eth_signature,
         });
 
         end_timer!(timer);
@@ -469,6 +578,9 @@ impl<E: Pairing> Transcript<E> {
     /// Verify transcript against a pre-computed initial transcript.
     /// This is much faster than verify_from_accumulator as it skips the expensive
     /// IFFT and MSM computations needed to regenerate the initial transcript.
+    ///
+    /// Note: This method does NOT verify Ethereum signatures. Use
+    /// `verify_from_initial_transcript_with_context` for full verification including signatures.
     #[inline]
     pub fn verify_from_initial_transcript(
         &self,
@@ -505,6 +617,61 @@ impl<E: Pairing> Transcript<E> {
         self.verify()?;
 
         Ok(())
+    }
+
+    /// Verify transcript against a pre-computed initial transcript, including Ethereum signature verification.
+    ///
+    /// # Arguments
+    /// * `initial_transcript` - The initial transcript to verify against
+    /// * `ceremony_id` - Ceremony identifier for signature verification
+    /// * `circuit` - Circuit type identifier for signature verification
+    #[inline]
+    pub fn verify_from_initial_transcript_with_context(
+        &self,
+        initial_transcript: &Transcript<E>,
+        ceremony_id: &str,
+        circuit: &str,
+    ) -> Result<(), Error> {
+        // First, perform all the standard verifications
+        self.verify_from_initial_transcript(initial_transcript)?;
+
+        // Then verify all signatures
+        self.verify_signatures(ceremony_id, circuit)?;
+
+        Ok(())
+    }
+
+    /// Verify Ethereum signatures for all contributions.
+    ///
+    /// # Arguments
+    /// * `ceremony_id` - Ceremony identifier for signature verification
+    /// * `circuit` - Circuit type identifier for signature verification
+    pub fn verify_signatures(&self, ceremony_id: &str, circuit: &str) -> Result<(), Error> {
+        for (i, contribution) in self.contributions.iter().enumerate() {
+            let step = (i + 1) as u64;
+            let context = ContributionContext::new(ceremony_id, step, circuit);
+
+            // Compute the expected message hash
+            let message_hash = compute_contribution_message::<E>(&context, &contribution.delta_g2)?;
+
+            // Recover the signer's address from the signature
+            let recovered_address = recover_eth_address(&message_hash, &contribution.eth_signature)?;
+
+            // Verify the recovered address matches the claimed address
+            if recovered_address != contribution.eth_address {
+                return Err(Error::SignatureAddressMismatch {
+                    expected: hex::encode(contribution.eth_address),
+                    actual: hex::encode(recovered_address),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the list of contributor Ethereum addresses.
+    pub fn contributor_addresses(&self) -> Vec<[u8; 20]> {
+        self.contributions.iter().map(|c| c.eth_address).collect()
     }
 }
 

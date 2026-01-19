@@ -5,10 +5,15 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 pub type PrivateKey<E> = <E as Pairing>::ScalarField;
 
-#[derive(CanonicalSerialize, CanonicalDeserialize, Debug, Clone, Copy, PartialEq)]
+/// Public key for a contribution, including Ethereum signature for attribution.
+#[derive(CanonicalSerialize, CanonicalDeserialize, Debug, Clone, PartialEq)]
 pub struct PublicKey<E: Pairing> {
     pub delta_g2: E::G2Affine,
     pub proof: RatioProof<E>,
+    /// Ethereum address of the contributor (20 bytes)
+    pub eth_address: [u8; 20],
+    /// ECDSA signature over the contribution context (r: 32, s: 32, v: 1)
+    pub eth_signature: [u8; 65],
 }
 
 impl<E: Pairing> PublicKey<E> {

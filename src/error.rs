@@ -65,6 +65,12 @@ pub enum Error {
 
     #[error("{0}")]
     Custom(String),
+
+    #[error("Invalid Ethereum signature")]
+    InvalidEthSignature,
+
+    #[error("Signature address mismatch: expected {expected}, got {actual}")]
+    SignatureAddressMismatch { expected: String, actual: String },
 }
 
 impl<E> From<PoisonError<E>> for Error {

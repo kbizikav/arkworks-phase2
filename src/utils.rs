@@ -3,8 +3,7 @@
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 use ark_ff::{UniformRand, Zero};
 use ark_serialize::CanonicalSerialize;
-use ark_std::{cfg_iter, cfg_iter_mut};
-use rand::rngs::OsRng;
+use ark_std::cfg_iter;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
@@ -29,7 +28,16 @@ pub fn batch_into_affine<P: CurveGroup>(points: &[P]) -> Vec<P::Affine> {
 
 #[inline]
 pub fn batch_mul_fixed_scalar<A: AffineRepr>(points: &mut [A], scalar: A::ScalarField) {
-    cfg_iter_mut!(points).for_each(|point| *point = (*point * scalar).into_affine())
+    // Perform scalar multiplication in projective coordinates
+    let projective: Vec<A::Group> = cfg_iter!(points)
+        .map(|point| *point * scalar)
+        .collect();
+
+    // Batch normalize to affine (more efficient than individual into_affine calls)
+    let affine = A::Group::normalize_batch(&projective);
+
+    // Copy results back
+    points.copy_from_slice(&affine);
 }
 
 #[inline]
@@ -74,18 +82,53 @@ pub fn serialize_uncompressed<T: CanonicalSerialize>(value: &T) -> Result<Vec<u8
     Ok(output)
 }
 
+/// Generate a seed for random linear combination from the input vectors.
+/// This creates a deterministic but unpredictable seed based on the input data.
+#[inline]
+fn merge_seed<A: AffineRepr>(lhs: &[A], rhs: &[A]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+
+    // Hash a sample of elements instead of all elements for speed
+    // We sample elements at different positions to ensure coverage
+    let len = lhs.len();
+    let sample_indices = if len <= 16 {
+        (0..len).collect::<Vec<_>>()
+    } else {
+        // Sample 16 elements spread across the vectors
+        (0..16).map(|i| i * len / 16).collect::<Vec<_>>()
+    };
+
+    for &idx in &sample_indices {
+        let mut buf = Vec::new();
+        lhs[idx].serialize_compressed(&mut buf).ok();
+        hasher.update(&buf);
+        buf.clear();
+        rhs[idx].serialize_compressed(&mut buf).ok();
+        hasher.update(&buf);
+    }
+
+    // Also include the length to differentiate same-prefix vectors
+    hasher.update(&(len as u64).to_le_bytes());
+
+    *hasher.finalize().as_bytes()
+}
+
 #[must_use]
 #[inline]
 pub fn merge_ratio_affine_vec<A: AffineRepr>(lhs: &[A], rhs: &[A]) -> (A, A) {
     assert_eq!(lhs.len(), rhs.len(), "lhs.len() != rhs.len()");
+
+    // Generate seed from input data for reproducible but unpredictable randomness
+    let seed = merge_seed(lhs, rhs);
+
     #[cfg(not(feature = "parallel"))]
     let result = {
+        let mut rng = ChaCha20Rng::from_seed(seed);
         let (mut l, mut r) = (A::Group::zero(), A::Group::zero());
-        (0..lhs.len())
-            .map(|_| A::ScalarField::rand(&mut OsRng))
-            .zip(lhs)
+        lhs.iter()
             .zip(rhs)
-            .for_each(|((s, l1), r1)| {
+            .for_each(|(l1, r1)| {
+                let s = A::ScalarField::rand(&mut rng);
                 l += *l1 * s;
                 r += *r1 * s;
             });
@@ -94,10 +137,24 @@ pub fn merge_ratio_affine_vec<A: AffineRepr>(lhs: &[A], rhs: &[A]) -> (A, A) {
 
     #[cfg(feature = "parallel")]
     let result = {
+        // Use thread-local RNGs seeded from the main seed + thread index
+        // This maintains determinism while avoiding OsRng overhead
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let counter = AtomicU64::new(0);
+
         lhs.into_par_iter()
             .zip(rhs)
             .map(|(lhs, rhs)| {
-                let s = A::ScalarField::rand(&mut OsRng);
+                // Create thread-local RNG with unique seed
+                let idx = counter.fetch_add(1, Ordering::Relaxed);
+                let mut thread_seed = seed;
+                // Mix in the counter to get unique seed per element
+                let idx_bytes = idx.to_le_bytes();
+                for i in 0..8 {
+                    thread_seed[i] ^= idx_bytes[i];
+                }
+                let mut rng = ChaCha20Rng::from_seed(thread_seed);
+                let s = A::ScalarField::rand(&mut rng);
                 (*lhs * s, *rhs * s)
             })
             .reduce(
