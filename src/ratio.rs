@@ -35,7 +35,7 @@ impl<E: Pairing> RatioProof<E> {
         })
     }
 
-    pub fn verify(&self, challenge: &[u8]) -> Result<bool, Error> {
+    pub fn verify(&self, challenge: &[u8]) -> Result<(), Error> {
         let generator = E::G1Affine::generator();
         let challenge_point = HashToCurve::<E>::hash_g2(&mut seeded_rng(
             &challenge
@@ -45,9 +45,40 @@ impl<E: Pairing> RatioProof<E> {
                 .chain(serialize(&self.point)?.into_iter())
                 .collect::<Vec<u8>>(),
         ));
-        Ok(same_ratio::<E>(
+        same_ratio::<E>(
             (generator, self.matching_point),
             (self.point, challenge_point),
-        ))
+        )
+        .then_some(())
+        .ok_or(Error::InvalidRatioProof)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_bn254::{Bn254, Fr};
+    use ark_ff::UniformRand;
+    use rand::rngs::OsRng;
+
+    #[test]
+    fn ratio_proof_roundtrip() {
+        let rng = &mut OsRng;
+        let delta = Fr::rand(rng);
+        let challenge = b"test challenge";
+
+        let proof = RatioProof::<Bn254>::generate(delta, challenge).expect("generate proof");
+        proof.verify(challenge).expect("verify proof");
+    }
+
+    #[test]
+    fn ratio_proof_wrong_challenge_fails() {
+        let rng = &mut OsRng;
+        let delta = Fr::rand(rng);
+        let challenge = b"test challenge";
+        let wrong_challenge = b"wrong challenge";
+
+        let proof = RatioProof::<Bn254>::generate(delta, challenge).expect("generate proof");
+        assert!(proof.verify(wrong_challenge).is_err());
     }
 }
