@@ -70,12 +70,14 @@ pub fn compute_contribution_message<E: Pairing>(
 
 /// Verify an Ethereum signature and recover the signer's address.
 /// Returns the recovered address if verification succeeds.
-pub fn recover_eth_address(message_hash: &[u8; 32], signature: &[u8; 65]) -> Result<[u8; 20], Error> {
+pub fn recover_eth_address(
+    message_hash: &[u8; 32],
+    signature: &[u8; 65],
+) -> Result<[u8; 20], Error> {
     use alloy_primitives::Signature;
 
     // Parse the signature (r, s, v format)
-    let sig = Signature::try_from(signature.as_slice())
-        .map_err(|_| Error::InvalidEthSignature)?;
+    let sig = Signature::try_from(signature.as_slice()).map_err(|_| Error::InvalidEthSignature)?;
 
     // Apply EIP-191 personal sign prefix
     let prefixed_hash = eip191_hash(message_hash);
@@ -152,7 +154,10 @@ impl<E: Pairing> Transcript<E> {
 
         let t_matrices = Instant::now();
         let constraint_matrices = cs.to_matrices()?;
-        eprintln!("[new_from_prepared_accumulator_finalized_cs] cs.to_matrices: {:?}", t_matrices.elapsed());
+        eprintln!(
+            "[new_from_prepared_accumulator_finalized_cs] cs.to_matrices: {:?}",
+            t_matrices.elapsed()
+        );
 
         let r1cs_matrices = constraint_matrices
             .get(R1CS_PREDICATE_LABEL)
@@ -176,7 +181,10 @@ impl<E: Pairing> Transcript<E> {
         let num_instance_variables = cs.num_instance_variables();
         let num_witness_variables = cs.num_witness_variables();
         let num_witnesses = num_instance_variables + num_witness_variables;
-        eprintln!("[new_from_prepared_accumulator_finalized_cs] num_witnesses={}", num_witnesses);
+        eprintln!(
+            "[new_from_prepared_accumulator_finalized_cs] num_witnesses={}",
+            num_witnesses
+        );
 
         // Transpose matrices: from constraint-indexed to witness-indexed
         let transpose_timer = start_timer!(|| "Transposing constraint matrices");
@@ -185,7 +193,10 @@ impl<E: Pairing> Transcript<E> {
         let b_by_witness = Self::transpose_matrix(b_matrix, num_witnesses);
         let c_by_witness = Self::transpose_matrix(c_matrix, num_witnesses);
         end_timer!(transpose_timer);
-        eprintln!("[new_from_prepared_accumulator_finalized_cs] transpose_matrix: {:?}", t_transpose.elapsed());
+        eprintln!(
+            "[new_from_prepared_accumulator_finalized_cs] transpose_matrix: {:?}",
+            t_transpose.elapsed()
+        );
 
         // Convert projective to affine for MSM
         let convert_timer = start_timer!(|| "Converting to affine for MSM");
@@ -195,7 +206,10 @@ impl<E: Pairing> Transcript<E> {
         let alpha_lagrange_g1_affine = batch_into_affine(&accum.alpha_lagrange_g1);
         let beta_lagrange_g1_affine = batch_into_affine(&accum.beta_lagrange_g1);
         end_timer!(convert_timer);
-        eprintln!("[new_from_prepared_accumulator_finalized_cs] batch_into_affine: {:?}", t_convert.elapsed());
+        eprintln!(
+            "[new_from_prepared_accumulator_finalized_cs] batch_into_affine: {:?}",
+            t_convert.elapsed()
+        );
 
         let specialize_constraints_timer =
             start_timer!(|| "Specializing constraints into phase 2 key (MSM)");
@@ -254,19 +268,28 @@ impl<E: Pairing> Transcript<E> {
         let t_a_g1 = Instant::now();
         let a_query_results = batch_compute_g1::<E>(&a_by_witness, &tau_lagrange_g1_affine);
         end_timer!(a_g1_timer);
-        eprintln!("[new_from_prepared_accumulator_finalized_cs] a_g1 query: {:?}", t_a_g1.elapsed());
+        eprintln!(
+            "[new_from_prepared_accumulator_finalized_cs] a_g1 query: {:?}",
+            t_a_g1.elapsed()
+        );
 
         let b_g1_timer = start_timer!(|| "Computing b_g1 query");
         let t_b_g1 = Instant::now();
         let b_g1_query_results = batch_compute_g1::<E>(&b_by_witness, &tau_lagrange_g1_affine);
         end_timer!(b_g1_timer);
-        eprintln!("[new_from_prepared_accumulator_finalized_cs] b_g1 query: {:?}", t_b_g1.elapsed());
+        eprintln!(
+            "[new_from_prepared_accumulator_finalized_cs] b_g1 query: {:?}",
+            t_b_g1.elapsed()
+        );
 
         let b_g2_timer = start_timer!(|| "Computing b_g2 query");
         let t_b_g2 = Instant::now();
         let b_g2_query_results = batch_compute_g2::<E>(&b_by_witness, &tau_lagrange_g2_affine);
         end_timer!(b_g2_timer);
-        eprintln!("[new_from_prepared_accumulator_finalized_cs] b_g2 query: {:?}", t_b_g2.elapsed());
+        eprintln!(
+            "[new_from_prepared_accumulator_finalized_cs] b_g2 query: {:?}",
+            t_b_g2.elapsed()
+        );
 
         let ext_timer = start_timer!(|| "Computing ext query");
         let t_ext = Instant::now();
@@ -274,13 +297,21 @@ impl<E: Pairing> Transcript<E> {
         let ext_b = batch_compute_g1::<E>(&b_by_witness, &alpha_lagrange_g1_affine);
         let ext_c = batch_compute_g1::<E>(&c_by_witness, &tau_lagrange_g1_affine);
         end_timer!(ext_timer);
-        eprintln!("[new_from_prepared_accumulator_finalized_cs] ext query: {:?}", t_ext.elapsed());
+        eprintln!(
+            "[new_from_prepared_accumulator_finalized_cs] ext query: {:?}",
+            t_ext.elapsed()
+        );
 
         // Combine ext results and build final result tuples
         let results: Vec<_> = (0..num_witnesses)
             .map(|i| {
                 let ext_i = (ext_a[i].into_group() + ext_b[i] + ext_c[i]).into_affine();
-                (a_query_results[i], b_g1_query_results[i], b_g2_query_results[i], ext_i)
+                (
+                    a_query_results[i],
+                    b_g1_query_results[i],
+                    b_g2_query_results[i],
+                    ext_i,
+                )
             })
             .collect();
 
@@ -384,7 +415,10 @@ impl<E: Pairing> Transcript<E> {
         let cs = ConstraintSystem::new_ref();
         circuit.generate_constraints(cs.clone())?;
         cs.finalize();
-        eprintln!("[new_from_accumulator] ConstraintSystem generate_constraints: {:?}", t0.elapsed());
+        eprintln!(
+            "[new_from_accumulator] ConstraintSystem generate_constraints: {:?}",
+            t0.elapsed()
+        );
 
         let num_constraints = Self::r1cs_constraint_count(&cs)?;
         let num_instance_variables = cs.num_instance_variables();
@@ -406,11 +440,17 @@ impl<E: Pairing> Transcript<E> {
 
         let t1 = Instant::now();
         let prepared = accum.prepare_with_size(size)?;
-        eprintln!("[new_from_accumulator] prepare_with_size: {:?}", t1.elapsed());
+        eprintln!(
+            "[new_from_accumulator] prepare_with_size: {:?}",
+            t1.elapsed()
+        );
 
         let t2 = Instant::now();
         let result = Self::new_from_prepared_accumulator_finalized_cs(&prepared, cs);
-        eprintln!("[new_from_accumulator] new_from_prepared_accumulator_finalized_cs: {:?}", t2.elapsed());
+        eprintln!(
+            "[new_from_accumulator] new_from_prepared_accumulator_finalized_cs: {:?}",
+            t2.elapsed()
+        );
 
         result
     }
@@ -493,10 +533,7 @@ impl<E: Pairing> Transcript<E> {
         let mut challenge: (E::G2Affine, Vec<u8>) =
             (self.initial_key.delta_g2, self.initial_key.challenge()?);
         for contribution in self.contributions.iter() {
-            contribution
-                .proof
-                .verify(&challenge.1)
-                .map_err(|_| Error::InvalidRatioProof)?;
+            contribution.proof.verify(&challenge.1)?;
 
             same_ratio_swap::<E>(
                 contribution.proof.get_g1(),
@@ -536,9 +573,7 @@ impl<E: Pairing> Transcript<E> {
         next: &PartialKey<E>,
         proof: &RatioProof<E>,
     ) -> Result<(), Error> {
-        proof
-            .verify(&prev.challenge()?)
-            .map_err(|_| Error::InvalidRatioProof)?;
+        proof.verify(&prev.challenge()?)?;
 
         (same_ratio_swap::<E>(proof.get_g1(), (prev.delta_g2, next.delta_g2))
             && same_ratio_swap::<E>(
@@ -655,7 +690,8 @@ impl<E: Pairing> Transcript<E> {
             let message_hash = compute_contribution_message::<E>(&context, &contribution.delta_g2)?;
 
             // Recover the signer's address from the signature
-            let recovered_address = recover_eth_address(&message_hash, &contribution.eth_signature)?;
+            let recovered_address =
+                recover_eth_address(&message_hash, &contribution.eth_signature)?;
 
             // Verify the recovered address matches the claimed address
             if recovered_address != contribution.eth_address {
