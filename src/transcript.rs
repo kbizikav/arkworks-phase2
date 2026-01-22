@@ -517,6 +517,7 @@ impl<E: Pairing> Transcript<E> {
         let eth_signature = sign_fn(&message_hash)?;
 
         self.contributions.push(PublicKey {
+            delta_g1: self.key.key.delta_g1,
             delta_g2: self.key.key.vk.delta_g2,
             proof,
             eth_address,

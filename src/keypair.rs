@@ -8,6 +8,7 @@ pub type PrivateKey<E> = <E as Pairing>::ScalarField;
 /// Public key for a contribution, including Ethereum signature for attribution.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Debug, Clone, PartialEq)]
 pub struct PublicKey<E: Pairing> {
+    pub delta_g1: E::G1Affine,
     pub delta_g2: E::G2Affine,
     pub proof: RatioProof<E>,
     /// Ethereum address of the contributor (20 bytes)
@@ -18,6 +19,9 @@ pub struct PublicKey<E: Pairing> {
 
 impl<E: Pairing> PublicKey<E> {
     pub fn challenge(&self) -> Result<Vec<u8>, Error> {
-        serialize(&self.delta_g2)
+        Ok(serialize(&self.delta_g1)?
+            .into_iter()
+            .chain(serialize(&self.delta_g2)?)
+            .collect())
     }
 }
